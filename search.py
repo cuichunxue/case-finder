@@ -1,21 +1,26 @@
-"""事例ファインダーの中核ロジック。
+"""事例ファインダーの中核ロジック（生成AI不使用・BERT系/語彙のみ）。
 
-- ローカルの埋め込みモデル（multilingual-e5）でテキストを意味ベクトル化
-- SQLite に事例テキストとベクトルを保存
-- クエリと事例の意味的な近さ（コサイン類似度）で検索
-- 事例同士の関連を計算してグラフ表示に渡す
+検索の品質を LLM-RAG 同等以上に近づけるため、次を組み合わせる:
+  1) チャンク単位の密検索（multilingual-e5 などの BERT 系エンコーダ）
+  2) ハイブリッド（BM25 の語彙一致を RRF で融合）→ 固有名詞・数値の取りこぼし対策
+  3) クロスエンコーダ・リランカーで上位を並べ替え（最大の精度レバー）
+  4) 抜粋ベースの根拠（該当チャンク＋クエリ語ハイライト）→ "なぜ近いか" を提示
 
-データは一切外部に送信しません。モデルは初回のみダウンロードし、以後はオフラインで動きます。
+いずれも未導入環境では自動でフォールバック（密のみ）し、壊れない。
+データは一切外部に送信しない。
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from functools import lru_cache
 
 import numpy as np
+
+import rerank
 
 # ──────────────────────────────────────────────────────────────
 # 設定
@@ -24,19 +29,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "cases.db")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
-# 日本語に強く軽量な多言語埋め込みモデル。完全ローカルで動作。
 MODEL_NAME = os.environ.get("CASE_FINDER_MODEL", "intfloat/multilingual-e5-small")
 
-# e5 の生コサインは無関係な日本語同士でも高め（0.75前後）に出る。
-# 「関連あり」と見なす最低ライン。これ未満は検索結果から除外する。
 MIN_SCORE = float(os.environ.get("CASE_FINDER_MIN_SCORE", "0.80"))
-# 「関連は弱いが候補に含めてよい」下限。0件時に“弱い候補も表示”で使う。
 WEAK_FLOOR = float(os.environ.get("CASE_FINDER_WEAK_FLOOR", str(max(0.0, MIN_SCORE - 0.08))))
-# 表示用の「関連度(0-100%)」へ変換する際の下限・上限（この区間を0〜100%に伸縮）。
 REL_FLOOR = float(os.environ.get("CASE_FINDER_REL_FLOOR", "0.78"))
 REL_CEIL = float(os.environ.get("CASE_FINDER_REL_CEIL", "0.92"))
-# グラフのエッジ（事例同士の線）を引く最低類似度。
 EDGE_FLOOR = float(os.environ.get("CASE_FINDER_EDGE_FLOOR", "0.82"))
+
+HYBRID = os.environ.get("CASE_FINDER_HYBRID", "auto")  # auto|off
+RRF_K = int(os.environ.get("CASE_FINDER_RRF_K", "60"))
+RERANK_TOP = int(os.environ.get("CASE_FINDER_RERANK_TOP", "50"))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -50,25 +53,50 @@ def _model():
 
 
 def embed(texts, kind: str):
-    """テキスト配列を正規化済みベクトルに変換する。
-
-    e5系モデルは用途に応じた接頭辞を付けると精度が上がる:
-      - 検索クエリ          -> "query: ..."
-      - 事例（被検索文書）  -> "passage: ..."
-    """
     assert kind in ("query", "passage")
     prefixed = [f"{kind}: {t}" for t in texts]
-    vecs = _model().encode(
-        prefixed, normalize_embeddings=True, convert_to_numpy=True
-    )
+    vecs = _model().encode(prefixed, normalize_embeddings=True, convert_to_numpy=True)
     return vecs.astype(np.float32)
 
 
 def relevance(cos: float) -> float:
-    """生コサインを直感的な関連度 0.0〜1.0 に変換する。"""
     if REL_CEIL <= REL_FLOOR:
         return max(0.0, min(1.0, cos))
     return max(0.0, min(1.0, (cos - REL_FLOOR) / (REL_CEIL - REL_FLOOR)))
+
+
+# ──────────────────────────────────────────────────────────────
+# トークナイザ（BM25・ハイライト共用。MeCab不要の日本語対応）
+# ──────────────────────────────────────────────────────────────
+_CJK = r"぀-ヿ一-鿿ｦ-ﾟ"
+
+
+def tokenize(text: str):
+    """英数語＋日本語の文字bigramに分割（語彙一致用）。"""
+    text = text.lower()
+    toks = re.findall(r"[a-z0-9][a-z0-9\-\.]*", text)
+    for run in re.findall(f"[{_CJK}]+", text):
+        if len(run) == 1:
+            toks.append(run)
+        else:
+            toks += [run[i:i + 2] for i in range(len(run) - 1)]
+    return toks
+
+
+def matched_spans(query: str, text: str, limit: int = 8):
+    """クエリ中で text に現れる語句（最大長で重複排除）。ハイライト用。"""
+    cands = set()
+    for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\.]+", query):
+        if len(w) >= 2 and w.lower() in text.lower():
+            cands.add(w)
+    for run in re.findall(f"[{_CJK}]{{2,}}", query):
+        for L in range(min(len(run), 12), 1, -1):
+            for i in range(len(run) - L + 1):
+                sub = run[i:i + L]
+                if sub in text:
+                    cands.add(sub)
+    maximal = [s for s in cands if not any(s != o and s in o for o in cands)]
+    return sorted(maximal, key=len, reverse=True)[:limit]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -84,50 +112,66 @@ def init_db(conn):
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS cases (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            title    TEXT NOT NULL,
+            source   TEXT NOT NULL UNIQUE,
+            text     TEXT NOT NULL,
+            excerpt  TEXT NOT NULL,
+            industry TEXT NOT NULL DEFAULT '',
+            problem  TEXT NOT NULL DEFAULT '',
+            action   TEXT NOT NULL DEFAULT '',
+            result   TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            title     TEXT NOT NULL,
-            source    TEXT NOT NULL UNIQUE,
+            case_id   INTEGER NOT NULL,
+            ord       INTEGER NOT NULL,
             text      TEXT NOT NULL,
-            excerpt   TEXT NOT NULL,
-            industry  TEXT NOT NULL DEFAULT '',
-            problem   TEXT NOT NULL DEFAULT '',
-            action    TEXT NOT NULL DEFAULT '',
-            result    TEXT NOT NULL DEFAULT '',
             embedding BLOB NOT NULL
         )
         """
     )
-    # 既存DB向けの簡易マイグレーション（不足列を追加）
-    existing = {r["name"] for r in conn.execute("PRAGMA table_info(cases)")}
-    for col in ("industry", "problem", "action", "result"):
-        if col not in existing:
-            conn.execute(f"ALTER TABLE cases ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_case ON chunks(case_id)")
     conn.commit()
 
 
-def upsert_case(conn, title, source, text, excerpt, industry, fields: dict, embedding: np.ndarray):
+def store_case(conn, title, source, text, excerpt, industry, fields, chunks):
+    """事例とそのチャンク群を保存（同一 source は置き換え）。chunks=[(text, vec), ...]。"""
     conn.execute(
         """
-        INSERT INTO cases (title, source, text, excerpt, industry, problem, action, result, embedding)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO cases (title, source, text, excerpt, industry, problem, action, result)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
             title=excluded.title, text=excluded.text, excerpt=excluded.excerpt,
             industry=excluded.industry, problem=excluded.problem,
-            action=excluded.action, result=excluded.result, embedding=excluded.embedding
+            action=excluded.action, result=excluded.result
         """,
-        (
-            title, source, text, excerpt, industry,
-            fields.get("problem", ""), fields.get("action", ""), fields.get("result", ""),
-            embedding.astype(np.float32).tobytes(),
-        ),
+        (title, source, text, excerpt, industry,
+         fields.get("problem", ""), fields.get("action", ""), fields.get("result", "")),
+    )
+    case_id = conn.execute("SELECT id FROM cases WHERE source = ?", (source,)).fetchone()["id"]
+    conn.execute("DELETE FROM chunks WHERE case_id = ?", (case_id,))
+    conn.executemany(
+        "INSERT INTO chunks (case_id, ord, text, embedding) VALUES (?, ?, ?, ?)",
+        [(case_id, i, t, np.asarray(v, dtype=np.float32).tobytes()) for i, (t, v) in enumerate(chunks)],
     )
     conn.commit()
+    return case_id
 
 
 def delete_sources(conn, sources):
     if not sources:
         return
-    conn.executemany("DELETE FROM cases WHERE source = ?", [(s,) for s in sources])
+    rows = conn.execute(
+        f"SELECT id FROM cases WHERE source IN ({','.join('?' * len(sources))})", tuple(sources)
+    ).fetchall()
+    ids = [r["id"] for r in rows]
+    conn.executemany("DELETE FROM chunks WHERE case_id = ?", [(i,) for i in ids])
+    conn.executemany("DELETE FROM cases WHERE id = ?", [(i,) for i in ids])
     conn.commit()
 
 
@@ -135,119 +179,203 @@ def all_sources(conn):
     return {r["source"] for r in conn.execute("SELECT source FROM cases")}
 
 
-def load_all(conn):
-    """全事例を (メタ情報リスト, ベクトル行列) で返す。"""
-    rows = conn.execute(
-        "SELECT id, title, source, text, excerpt, industry, problem, action, result, embedding FROM cases"
-    ).fetchall()
-    meta, mats = [], []
-    for r in rows:
-        meta.append(
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "source": r["source"],
-                "text": r["text"],
-                "excerpt": r["excerpt"],
-                "industry": r["industry"],
-                "problem": r["problem"],
-                "action": r["action"],
-                "result": r["result"],
-            }
-        )
-        mats.append(np.frombuffer(r["embedding"], dtype=np.float32))
-    matrix = np.vstack(mats) if mats else np.zeros((0, 0), dtype=np.float32)
-    return meta, matrix
-
-
 # ──────────────────────────────────────────────────────────────
-# インメモリ・インデックス（毎クエリのSQLite全読込を回避）
+# インメモリ・インデックス（チャンク行列＋BM25）
 # ──────────────────────────────────────────────────────────────
 _LOCK = threading.Lock()
-_INDEX = None  # {"meta":..., "matrix":..., "mtime":...}
+_INDEX = None
 
 
 def _db_mtime():
     return os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0.0
 
 
+def _build_index(conn):
+    cases = conn.execute(
+        "SELECT id, title, source, text, excerpt, industry, problem, action, result "
+        "FROM cases ORDER BY id"
+    ).fetchall()
+    meta, id2pos = [], {}
+    for pos, r in enumerate(cases):
+        id2pos[r["id"]] = pos
+        meta.append({k: r[k] for k in
+                     ("id", "title", "source", "text", "excerpt", "industry", "problem", "action", "result")})
+
+    rows = conn.execute("SELECT case_id, text, embedding FROM chunks ORDER BY case_id, ord").fetchall()
+    chunk_text, chunk_case, embs = [], [], []
+    for r in rows:
+        pos = id2pos.get(r["case_id"])
+        if pos is None:
+            continue
+        chunk_text.append(r["text"])
+        chunk_case.append(pos)
+        embs.append(np.frombuffer(r["embedding"], dtype=np.float32))
+
+    C = len(meta)
+    chunk_emb = np.vstack(embs) if embs else np.zeros((0, 0), dtype=np.float32)
+    chunk_by_case = [[] for _ in range(C)]
+    for ci, pos in enumerate(chunk_case):
+        chunk_by_case[pos].append(ci)
+
+    d = chunk_emb.shape[1] if chunk_emb.size else 0
+    case_vec = np.zeros((C, d), dtype=np.float32)
+    for pos, cis in enumerate(chunk_by_case):
+        if cis:
+            v = chunk_emb[cis].mean(axis=0)
+            n = np.linalg.norm(v)
+            case_vec[pos] = v / n if n else v
+
+    bm25 = None
+    if HYBRID != "off" and chunk_text:
+        try:
+            from rank_bm25 import BM25Okapi
+
+            bm25 = BM25Okapi([tokenize(t) for t in chunk_text])
+        except Exception:  # noqa: BLE001
+            bm25 = None
+
+    return {
+        "meta": meta, "case_vec": case_vec, "chunk_emb": chunk_emb,
+        "chunk_text": chunk_text, "chunk_by_case": chunk_by_case, "bm25": bm25,
+    }
+
+
 def get_index():
-    """事例メタとベクトル行列をメモリから返す。DB更新は mtime で自動検知。"""
     global _INDEX
     with _LOCK:
         mt = _db_mtime()
         if _INDEX is None or _INDEX["mtime"] != mt:
             conn = connect()
             init_db(conn)
-            meta, matrix = load_all(conn)
+            ix = _build_index(conn)
             conn.close()
-            _INDEX = {"meta": meta, "matrix": matrix, "mtime": _db_mtime()}
-        return _INDEX["meta"], _INDEX["matrix"]
+            ix["mtime"] = _db_mtime()
+            _INDEX = ix
+        return _INDEX
 
 
 def invalidate_cache():
-    """ingest/upload 後に明示的にキャッシュを破棄する。"""
     global _INDEX
     with _LOCK:
         _INDEX = None
 
 
 # ──────────────────────────────────────────────────────────────
-# 検索 + グラフ
+# ランキング（密 → ハイブリッド → リランク）
 # ──────────────────────────────────────────────────────────────
-def search(query: str, top_k: int = 6, industry: str = "", min_score: float | None = None):
-    """クエリに意味的に近い事例を返す。ベクトルは正規化済みなので内積=コサイン類似度。"""
-    if min_score is None:
-        min_score = MIN_SCORE
-    meta, matrix = get_index()
-    if not meta or not query.strip():
-        return {"nodes": [], "edges": []}
+def _ranks(order):
+    """argsort 降順の並びから各要素の順位(0始まり)を返す。"""
+    r = np.empty(len(order), dtype=np.int64)
+    r[order] = np.arange(len(order))
+    return r
+
+
+def _rank_cases(ix, query):
+    """事例を関連順に並べる。各要素 = {pos, cos, best}（cos=最良チャンクの類似度）。"""
+    chunk_emb = ix["chunk_emb"]
+    chunk_by_case = ix["chunk_by_case"]
+    C = len(ix["meta"])
+    if not C or chunk_emb.size == 0:
+        return []
 
     qv = embed([query], "query")[0]
-    scores = matrix @ qv  # (N,)
+    chunk_cos = chunk_emb @ qv  # (M,)
 
-    nodes = []
-    hidden = 0  # 閾値未満だが WEAK_FLOOR 以上の「弱い候補」の件数
-    for i in np.argsort(-scores):
-        s = float(scores[i])
-        if s < WEAK_FLOOR:
-            break  # 降順なので以降は弱い候補にも満たない
-        m = meta[i]
+    case_cos = np.full(C, -1.0)
+    best = np.zeros(C, dtype=np.int64)
+    for pos, cis in enumerate(chunk_by_case):
+        if not cis:
+            continue
+        sub = chunk_cos[cis]
+        j = int(np.argmax(sub))
+        case_cos[pos] = float(sub[j])
+        best[pos] = cis[j]
+
+    # ハイブリッド（BM25 を RRF 融合）
+    rank_dense = _ranks(np.argsort(-case_cos))
+    if ix["bm25"] is not None:
+        cb = np.asarray(ix["bm25"].get_scores(tokenize(query)))
+        case_bm = np.zeros(C)
+        for pos, cis in enumerate(chunk_by_case):
+            if cis:
+                case_bm[pos] = float(cb[cis].max())
+        rank_bm = _ranks(np.argsort(-case_bm))
+        fused = 1.0 / (RRF_K + rank_dense) + 1.0 / (RRF_K + rank_bm)
+    else:
+        fused = 1.0 / (RRF_K + rank_dense)
+
+    cand = list(np.argsort(-fused))
+
+    # クロスエンコーダ・リランク（上位のみ）
+    if rerank.available() and cand:
+        topN = cand[:RERANK_TOP]
+        texts = [ix["chunk_text"][int(best[pos])] for pos in topN]
+        scores = rerank.rerank(query, texts)
+        if scores is not None:
+            reordered = [pos for _, pos in sorted(zip(scores, topN), key=lambda x: -x[0])]
+            cand = reordered + cand[RERANK_TOP:]
+
+    return [{"pos": int(pos), "cos": float(case_cos[pos]), "best": int(best[pos])} for pos in cand]
+
+
+def ranked_sources(query: str, industry: str = "", limit: int = 50):
+    """評価用：閾値・top_kを無視した事例ソースの関連順リスト。"""
+    ix = get_index()
+    out = []
+    for r in _rank_cases(ix, query):
+        m = ix["meta"][r["pos"]]
         if industry and m["industry"] != industry:
             continue
-        if s < min_score:
+        out.append(m["source"])
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ──────────────────────────────────────────────────────────────
+# 検索（表示用）
+# ──────────────────────────────────────────────────────────────
+def search(query: str, top_k: int = 6, industry: str = "", min_score: float | None = None):
+    if min_score is None:
+        min_score = MIN_SCORE
+    ix = get_index()
+    if not ix["meta"] or not query.strip():
+        return {"nodes": [], "edges": [], "hidden": 0}
+
+    nodes, hidden = [], 0
+    for r in _rank_cases(ix, query):
+        cos = r["cos"]
+        if cos < WEAK_FLOOR:
+            continue  # リランク後は順序が類似度降順とは限らないため break しない
+        m = ix["meta"][r["pos"]]
+        if industry and m["industry"] != industry:
+            continue
+        if cos < min_score:
             hidden += 1
             continue
         if len(nodes) >= top_k:
-            continue  # これ以上は表示しないが hidden 集計は続ける
-        nodes.append(
-            {
-                "id": m["id"],
-                "title": m["title"],
-                "source": m["source"],
-                "excerpt": m["excerpt"],
-                "industry": m["industry"],
-                "problem": m["problem"],
-                "action": m["action"],
-                "result": m["result"],
-                "score": s,
-                "relevance": relevance(s),
-                "_idx": int(i),
-            }
-        )
+            continue
+        evidence = ix["chunk_text"][r["best"]]
+        nodes.append({
+            "id": m["id"], "title": m["title"], "source": m["source"], "excerpt": m["excerpt"],
+            "industry": m["industry"], "problem": m["problem"], "action": m["action"], "result": m["result"],
+            "score": cos, "relevance": relevance(cos),
+            "evidence": evidence[:300] + ("…" if len(evidence) > 300 else ""),
+            "matched": matched_spans(query, evidence),
+            "_idx": r["pos"],
+        })
 
-    edges = _edges(nodes, matrix)
+    edges = _edges(nodes, ix["case_vec"])
     for n in nodes:
         n.pop("_idx", None)
     return {"nodes": nodes, "edges": edges, "hidden": hidden}
 
 
-def _edges(nodes, matrix):
-    """事例同士の関連（グラフの細い線）。閾値は分位点と下限の大きい方で動的に決める。"""
+def _edges(nodes, case_vec):
     pairs = []
     for a in range(len(nodes)):
         for b in range(a + 1, len(nodes)):
-            sim = float(matrix[nodes[a]["_idx"]] @ matrix[nodes[b]["_idx"]])
+            sim = float(case_vec[nodes[a]["_idx"]] @ case_vec[nodes[b]["_idx"]])
             pairs.append((nodes[a]["id"], nodes[b]["id"], sim))
     if not pairs:
         return []
@@ -257,10 +385,15 @@ def _edges(nodes, matrix):
 
 
 def list_industries():
-    meta, _ = get_index()
-    return sorted({m["industry"] for m in meta if m["industry"]})
+    return sorted({m["industry"] for m in get_index()["meta"] if m["industry"]})
 
 
 def stats():
-    meta, _ = get_index()
-    return {"count": len(meta), "model": MODEL_NAME, "industries": list_industries()}
+    ix = get_index()
+    return {
+        "count": len(ix["meta"]),
+        "model": MODEL_NAME,
+        "industries": sorted({m["industry"] for m in ix["meta"] if m["industry"]}),
+        "hybrid": ix["bm25"] is not None,
+        "reranker": rerank.available(),
+    }

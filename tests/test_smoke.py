@@ -1,21 +1,23 @@
 """スモークテスト（スタブ埋め込み）。
 
-実モデル/OCRなしで、抽出・閾値/弱い候補・prune・API・認証の配線を検証する。
+実モデル/OCRなしで、抽出・チャンク検索・閾値/弱い候補・ハイブリッド・リランク・
+抜粋根拠・prune・API・認証・非同期取り込みの配線を検証する。
 """
 
 from __future__ import annotations
 
 import base64
 import io
-import math
 import time
 
 import numpy as np
 
+from conftest import store_one
 
-def _unit(cos):
-    """[1,0] との内積（コサイン）が cos になる単位ベクトル。"""
-    return np.array([cos, math.sqrt(max(0.0, 1 - cos * cos))], dtype=np.float32)
+
+def _q10(monkeypatch, s):
+    """クエリ埋め込みを [1,0] 固定にする（store_one の2次元ベクトルと整合）。"""
+    monkeypatch.setattr(s, "embed", lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
 
 
 # ── 課題/施策/成果の抽出（見出しパス）──
@@ -32,7 +34,7 @@ def test_relevance_mapping(env):
     s = env.search
     assert s.relevance(s.REL_CEIL) == 1.0
     assert s.relevance(s.REL_FLOOR) == 0.0
-    assert s.relevance(s.REL_FLOOR - 0.1) == 0.0  # 下限未満は0でクランプ
+    assert s.relevance(s.REL_FLOOR - 0.1) == 0.0
 
 
 # ── 閾値・弱い候補(hidden)・loose ──
@@ -40,21 +42,20 @@ def test_search_threshold_and_hidden(env, monkeypatch):
     s = env.search
     conn = s.connect()
     s.init_db(conn)
-    s.upsert_case(conn, "A", "a.txt", "t", "e", "", {}, _unit(1.00))
-    s.upsert_case(conn, "B", "b.txt", "t", "e", "", {}, _unit(0.85))
-    s.upsert_case(conn, "C", "c.txt", "t", "e", "", {}, _unit(0.78))
+    store_one(s, conn, "A", "a.txt", 1.00)
+    store_one(s, conn, "B", "b.txt", 0.85)
+    store_one(s, conn, "C", "c.txt", 0.78)
     conn.close()
     s.invalidate_cache()
 
-    monkeypatch.setattr(s, "embed", lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
+    _q10(monkeypatch, s)
     monkeypatch.setattr(s, "MIN_SCORE", 0.80)
     monkeypatch.setattr(s, "WEAK_FLOOR", 0.75)
 
     r = s.search("q", top_k=6)
     assert [n["title"] for n in r["nodes"]] == ["A", "B"]
-    assert r["hidden"] == 1  # C は閾値未満だが WEAK_FLOOR 以上
+    assert r["hidden"] == 1
 
-    # loose（弱い候補も表示）で C が出る
     r2 = s.search("q", top_k=6, min_score=s.WEAK_FLOOR)
     assert "C" in [n["title"] for n in r2["nodes"]]
 
@@ -64,60 +65,110 @@ def test_industry_filter(env, monkeypatch):
     s = env.search
     conn = s.connect()
     s.init_db(conn)
-    s.upsert_case(conn, "M", "m.txt", "t", "e", "製造", {}, _unit(0.95))
-    s.upsert_case(conn, "R", "r.txt", "t", "e", "小売・EC", {}, _unit(0.95))
+    store_one(s, conn, "M", "m.txt", 0.95, industry="製造")
+    store_one(s, conn, "R", "r.txt", 0.95, industry="小売・EC")
     conn.close()
     s.invalidate_cache()
-    monkeypatch.setattr(s, "embed", lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
+    _q10(monkeypatch, s)
     r = s.search("q", top_k=6, industry="製造", min_score=0.0)
     assert [n["title"] for n in r["nodes"]] == ["M"]
     assert s.list_industries() == ["小売・EC", "製造"]
 
 
-# ── prune（消えたファイルのレコード掃除）──
+# ── prune（事例とチャンクの両方が消える）──
 def test_prune(env):
     s = env.search
     conn = s.connect()
     s.init_db(conn)
-    s.upsert_case(conn, "X", "data/gone.txt", "t", "e", "", {}, _unit(1.0))
+    store_one(s, conn, "X", "data/gone.txt", 1.0)
     assert "data/gone.txt" in s.all_sources(conn)
+    chunks_before = conn.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+    assert chunks_before == 1
     s.delete_sources(conn, {"data/gone.txt"})
     assert "data/gone.txt" not in s.all_sources(conn)
+    assert conn.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"] == 0
     conn.close()
 
 
-# ── キャッシュ（明示無効化）──
+# ── キャッシュ ──
 def test_cache_invalidate(env):
     s = env.search
     conn = s.connect()
     s.init_db(conn)
-    s.upsert_case(conn, "A", "a.txt", "t", "e", "", {}, _unit(1.0))
+    store_one(s, conn, "A", "a.txt", 1.0)
     conn.close()
     s.invalidate_cache()
-    meta1, _ = s.get_index()
-    assert len(meta1) == 1
+    assert len(s.get_index()["meta"]) == 1
 
 
-# ── API: stats / search ──
+# ── 抜粋根拠とハイライト用語 ──
+def test_matched_spans(env):
+    s = env.search
+    spans = s.matched_spans("属人化のベテラン頼み", "ベテラン頼みで属人化している")
+    # 最大長で重複排除されるため "属人化" と "ベテラン頼み" のように現れる
+    assert any("属人化" in x for x in spans)
+    assert any("ベテラン" in x for x in spans)
+
+
+# ── ハイブリッド：完全一致語で1件に寄せる ──
+def test_hybrid_lexical_match(env, monkeypatch):
+    s = env.search
+    monkeypatch.setattr(s, "HYBRID", "auto")  # BM25 を有効化
+    conn = s.connect()
+    s.init_db(conn)
+    for title, src, text in [
+        ("型番の不具合", "p.txt", "型番ABC123 の不具合と対策"),
+        ("別の話題", "o.txt", "まったく無関係な内容"),
+    ]:
+        vec = s.embed([text], "passage")[0]
+        s.store_case(conn, title, src, text, "e", "", {}, [(text, vec)])
+    conn.close()
+    s.invalidate_cache()
+    # クエリ "ABC123" は密では弱いが BM25 の完全一致で p.txt が先頭に来る
+    assert s.ranked_sources("ABC123", limit=2)[0] == "p.txt"
+
+
+# ── リランカー：順序を入れ替える ──
+def test_reranker_reorders(env, monkeypatch):
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 0.90)
+    store_one(s, conn, "B", "b.txt", 0.85)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_SCORE", 0.5)
+    # 候補順 [A, B] に対し B を高評価にするリランカーを差し込む
+    monkeypatch.setattr(env.rerank, "available", lambda: True)
+    monkeypatch.setattr(env.rerank, "rerank", lambda q, texts: [0.0, 1.0])
+    r = s.search("q", top_k=6)
+    assert [n["title"] for n in r["nodes"]] == ["B", "A"]
+
+
+# ── API: stats / search（evidence・matched付き）──
 def test_api_stats_and_search(env, monkeypatch):
     import app
 
     s = env.search
     conn = s.connect()
     s.init_db(conn)
-    s.upsert_case(conn, "A", "a.txt", "t", "e", "製造", {}, _unit(1.0))
+    store_one(s, conn, "A", "a.txt", 1.0, industry="製造", text="属人化を解消した")
     conn.close()
     s.invalidate_cache()
-    monkeypatch.setattr(s, "embed", lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
+    _q10(monkeypatch, s)
     monkeypatch.setattr(s, "MIN_SCORE", 0.5)
 
     c = app.app.test_client()
     st = c.get("/api/stats").get_json()
     assert st["count"] == 1 and st["industries"] == ["製造"]
+    assert "hybrid" in st and "reranker" in st
 
-    js = c.get("/api/search?q=hello").get_json()
+    js = c.get("/api/search?q=属人化").get_json()
     assert "nodes" in js and "hidden" in js
-    assert js["nodes"][0]["title"] == "A"
+    n0 = js["nodes"][0]
+    assert n0["title"] == "A"
+    assert "evidence" in n0 and "matched" in n0
 
 
 # ── API: 認証（全体/書き込み専用）──
@@ -126,14 +177,12 @@ def test_auth_full_and_write_only(env, monkeypatch):
 
     c = app.app.test_client()
 
-    # 全体認証
     monkeypatch.setattr(app, "AUTH_PASSWORD", "secret")
     monkeypatch.setattr(app, "WRITE_PASSWORD", None)
     assert c.get("/api/stats").status_code == 401
     hdr = {"Authorization": "Basic " + base64.b64encode(b"user:secret").decode()}
     assert c.get("/api/stats", headers=hdr).status_code == 200
 
-    # 書き込み専用認証（読みは自由・POSTのみ要認証）
     monkeypatch.setattr(app, "AUTH_PASSWORD", None)
     monkeypatch.setattr(app, "WRITE_PASSWORD", "w")
     assert c.get("/api/stats").status_code == 200
@@ -145,8 +194,8 @@ def test_upload_async_job(env, monkeypatch):
     import app
     import jobs
 
-    monkeypatch.setattr(env.search, "embed",
-                        lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
+    # 同期モードで決定的に処理（バックグラウンドスレッドの非決定性を排除）
+    monkeypatch.setenv("CASE_FINDER_SYNC_JOBS", "1")
 
     c = app.app.test_client()
     data = {
@@ -155,12 +204,6 @@ def test_upload_async_job(env, monkeypatch):
     }
     r = c.post("/api/upload", data=data, content_type="multipart/form-data").get_json()
     assert "job_id" in r
-
-    job = None
-    for _ in range(80):  # 最大8秒待つ
-        job = jobs.get(r["job_id"])
-        if job and job["status"] in ("done", "error"):
-            break
-        time.sleep(0.1)
+    job = jobs.get(r["job_id"])
     assert job and job["status"] == "done", job
     assert "u.txt" in job["added"]

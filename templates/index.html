@@ -70,6 +70,9 @@
   .row-label{color:var(--sub); font-size:11.5px; margin-bottom:3px;}
   .row-val{font-size:14px; line-height:1.6; white-space:pre-wrap;}
   .open-link{color:var(--accent2); font-size:13px; text-decoration:none;}
+  .evidence{background:#0E1116; border:1px solid var(--line); border-radius:8px;
+    padding:10px 12px; font-size:13px; line-height:1.7; color:var(--ink); white-space:pre-wrap;}
+  .evidence mark{background:#F2B44133; color:var(--accent2); padding:0 1px; border-radius:3px;}
   @media (prefers-reduced-motion: reduce){ *{animation:none!important; transition:none!important;} }
 </style>
 </head>
@@ -119,7 +122,8 @@ function fillIndustries(list){
 async function loadStats(){
   try{
     const s = await (await fetch("/api/stats")).json();
-    $("#metatext").textContent = `登録事例 ${s.count} 件 ・ モデル: ${s.model}`;
+    const modes = [s.hybrid ? "ハイブリッド" : "密のみ", s.reranker ? "リランカー有" : "リランカー無"];
+    $("#metatext").textContent = `登録事例 ${s.count} 件 ・ ${s.model} ・ ${modes.join(" / ")}`;
     fillIndustries(s.industries || []);
   }catch(e){ /* noop */ }
 }
@@ -252,10 +256,15 @@ function renderDetail(c, nodes){
         <h3>${esc(c.title)}</h3>${matchBadge(c)}
       </div>
       ${fieldRow("業種", c.industry)}
+      ${c.evidence ? `
+        <div style="margin-bottom:12px;">
+          <div class="row-label">なぜ近いか（本文の該当箇所）</div>
+          <div class="evidence">${highlight(c.evidence, c.matched)}</div>
+        </div>` : ""}
       ${fieldRow("課題", c.problem)}
       ${fieldRow("施策", c.action)}
       ${fieldRow("成果", c.result, "var(--accent)")}
-      ${(!c.problem && !c.action && !c.result) ? `
+      ${(!c.problem && !c.action && !c.result && !c.evidence) ? `
         <div style="margin-bottom:12px;">
           <div class="row-label">本文（抜粋）</div>
           <div class="row-val">${esc(c.excerpt)}</div>
@@ -319,6 +328,18 @@ function drawGraph(data, selectedId){
 }
 
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// 根拠テキストの該当語をハイライト（長い語から順に、エスケープ後の文字列を対象に）
+function highlight(text, terms){
+  let html = esc(text);
+  const uniq = [...new Set(terms || [])].sort((a,b) => b.length - a.length);
+  for(const t of uniq){
+    if(!t) continue;
+    const e = esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    html = html.replace(new RegExp(e, "g"), "<mark>$&</mark>");
+  }
+  return html;
+}
 
 $("#go").onclick = () => run(false);
 $("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(false); });

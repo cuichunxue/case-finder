@@ -34,7 +34,6 @@ def get(jid: str):
 
 def submit(paths: list[str], industry: str = "") -> str:
     """取り込みジョブを投入し、ジョブIDを返す。"""
-    _ensure_worker()
     jid = uuid.uuid4().hex[:8]
     _set(
         jid,
@@ -48,6 +47,14 @@ def submit(paths: list[str], industry: str = "") -> str:
         errors=[],
         created=time.time(),
     )
+    # 同期モード（テスト/CI向け）: その場で処理して完了させる
+    if os.environ.get("CASE_FINDER_SYNC_JOBS"):
+        try:
+            _process(jid, paths, industry)
+        except Exception as e:  # noqa: BLE001
+            _set(jid, status="error", errors=[str(e)])
+        return jid
+    _ensure_worker()
     _q.put((jid, paths, industry))
     return jid
 

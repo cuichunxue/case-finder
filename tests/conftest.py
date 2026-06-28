@@ -36,6 +36,7 @@ def _fake_embed(texts, kind):
 def env(tmp_path, monkeypatch):
     import extract
     import ingest
+    import rerank
     import search
 
     datadir = tmp_path / "data"
@@ -48,12 +49,27 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(extract, "embed", _fake_embed)
     monkeypatch.setattr(ingest, "embed", _fake_embed)
 
+    # 既定はリランカー無効・ハイブリッド無効で決定的に（各テストで切替）。
+    monkeypatch.setattr(rerank, "available", lambda: False)
+    monkeypatch.setattr(search, "HYBRID", "off")
+
     extract._prototypes.cache_clear()
     extract._industry_protos.cache_clear()
     search.invalidate_cache()
 
     yield types.SimpleNamespace(
-        search=search, extract=extract, ingest=ingest, datadir=datadir, tmp=tmp_path
+        search=search, extract=extract, ingest=ingest, rerank=rerank,
+        datadir=datadir, tmp=tmp_path,
     )
 
     search.invalidate_cache()
+
+
+def store_one(search, conn, title, source, cos, industry="", text="本文", fields=None):
+    """[1,0] とのコサインが cos になる単一チャンクの事例を保存（テスト用）。"""
+    import math
+
+    import numpy as np
+
+    vec = np.array([cos, math.sqrt(max(0.0, 1 - cos * cos))], dtype=np.float32)
+    search.store_case(conn, title, source, text, "e", industry, fields or {}, [(text, vec)])

@@ -4,20 +4,25 @@
     python ingest.py            # data/ 全体を取り込み
     python ingest.py foo.pdf    # 個別ファイルを取り込み
 
-1ファイル = 1事例 として扱います。タイトルはファイル名（拡張子なし）です。
+1ファイル = 1事例 とし、本文は節単位のチャンクに分割して埋め込みます
+（長文・複数トピックの取りこぼしを防ぐため）。
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import ocr
 import search
 from extract import classify_industry, extract_fields
-from search import DATA_DIR, connect, embed, init_db, upsert_case
+from search import DATA_DIR, connect, embed, init_db, store_case
 
 SUPPORTED = (".pdf", ".pptx", ".ppt", ".txt", ".md")
+
+# チャンク分割の目安（文字数）
+CHUNK_SIZE = int(os.environ.get("CASE_FINDER_CHUNK_SIZE", "400"))
 
 # テキスト層がこの文字数未満のページ/スライドは画像中心とみなし OCR にかける
 OCR_TRIGGER_CHARS = 12
@@ -83,6 +88,28 @@ def make_excerpt(text: str, limit: int = 240) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
+def chunk_text(text: str, size: int = CHUNK_SIZE):
+    """本文を節単位のチャンクに分割する（行/段落でまとめ、長すぎる塊は強制分割）。"""
+    paras = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
+    chunks, cur = [], ""
+    for p in paras:
+        if len(p) > size:  # 長い段落は固定長で割る
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            for i in range(0, len(p), size):
+                chunks.append(p[i:i + size])
+        elif len(cur) + len(p) + 1 <= size:
+            cur = (cur + "\n" + p).strip()
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = p
+    if cur:
+        chunks.append(cur)
+    return chunks or [text[:size]]
+
+
 def ingest_file(conn, path: str, ocr_ok: bool, industry: str | None = None) -> bool:
     title = os.path.splitext(os.path.basename(path))[0]
     source = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__)))
@@ -99,11 +126,13 @@ def ingest_file(conn, path: str, ocr_ok: bool, industry: str | None = None) -> b
     # BERT埋め込みで「課題/施策/成果」に分類、業種を推定（指定があれば優先）
     fields = extract_fields(text)
     ind = industry if industry is not None else classify_industry(text)
-    # タイトルを先頭に足して意味の手掛かりを強める
-    vec = embed([f"{title}\n{text}"], "passage")[0]
-    upsert_case(conn, title, source, text, make_excerpt(text), ind, fields, vec)
+    # 本文をチャンク化し、各チャンクをタイトル付きで埋め込む
+    pieces = chunk_text(text)
+    vecs = embed([f"{title}\n{c}" for c in pieces], "passage")
+    chunks = list(zip(pieces, vecs))
+    store_case(conn, title, source, text, make_excerpt(text), ind, fields, chunks)
     got = [name for name, key in (("課題", "problem"), ("施策", "action"), ("成果", "result")) if fields.get(key)]
-    print(f"  ✓ {source}  ({len(text)} 文字 / 業種: {ind or '不明'} / 抽出: {('・'.join(got)) or 'なし'})")
+    print(f"  ✓ {source}  ({len(text)} 文字 / {len(chunks)}チャンク / 業種: {ind or '不明'} / 抽出: {('・'.join(got)) or 'なし'})")
     return True
 
 

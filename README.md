@@ -5,6 +5,10 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 **データは外部に送信しません。生成AI（LLM）は使いません。**
 意味理解は BERT 系エンコーダ、画像中心の資料は OCR で扱います（モデルは初回のみDL）。
 
+検索は **チャンク密検索 ＋ BM25ハイブリッド ＋ クロスエンコーダ・リランカー** の
+3段構成で、LLM-RAG 同等以上の精度を狙います（いずれも非生成・BERT系/語彙）。
+精度は `bench.py`（Recall@k / MRR / nDCG）で測定できます。
+
 ## できること
 - `data/` に置いた PPT / PDF を読み取り、意味ベクトル化して登録
 - **画面からアップロード**しても取り込める（CLI不要・その場で検索対象に）
@@ -93,19 +97,36 @@ pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR�
 
 ## 仕組み（生成AI不使用）
 - 抽出: `PyMuPDF`（PDF）/ `python-pptx`（PPT）
-- OCR: 既定は `EasyOCR`（Apache-2.0・商用可）、代替で `Tesseract`。テキスト層が乏しいページ/画像スライドを自動でOCR
+- OCR: 既定は `EasyOCR`（Apache-2.0・商用可）、代替で `Tesseract`
+- チャンク化: 本文を節単位に分割して各チャンクを埋め込み（長文・複数トピック対策）
 - 意味ベクトル: `sentence-transformers` の `intfloat/multilingual-e5-small`
   （XLM-RoBERTa ＝ BERT 系エンコーダ。生成LLMではありません）
-- 課題/施策/成果の仕分け・業種推定: 見出し検出 ＋ **BERT埋め込みのゼロショット分類**
-  （各文/本文を埋め込み、ラベル代表文との類似度で割り当て）
+- **ハイブリッド検索**: 密検索（コサイン）＋ BM25（語彙一致）を RRF で融合
+  → 固有名詞・型番・数値の取りこぼしを抑制
+- **リランカー**: 上位候補を日本語クロスエンコーダで並べ替え（精度の最大レバー）
+- **抜粋根拠**: ヒットの該当チャンクとクエリ語のハイライトで「なぜ近いか」を提示（生成なし）
+- 課題/施策/成果の仕分け・業種推定: 見出し検出 ＋ BERT埋め込みのゼロショット分類
 - 関連度: 生コサインを閾値で足切りし、表示用に 0〜100% へ伸縮（無関係を出さない）
-- 高速化: 起動時にベクトル行列をメモリ保持。取り込み時に自動更新（毎回の全読込を回避）
-- 保存: SQLite（`cases.db`）。再起動しても再計算不要
-- 検索: コサイン類似度（ベクトルは正規化済み）
+- 高速化: 起動時にインデックスをメモリ保持＋モデルwarmup。取り込み時に自動更新
+- 保存: SQLite（`cases.db`、事例＋チャンク）。再起動しても再計算不要
 
-別のモデルを使いたい場合は環境変数で指定できます:
+### 精度を上げる（LLM同等以上を狙う設定）
+既定は軽量モデルです。精度重視なら、より強い日本語埋め込み＋リランカーに差し替え:
 ```bash
-CASE_FINDER_MODEL=intfloat/multilingual-e5-base python ingest.py
+# 例: 高精度な日本語埋め込み + 日本語リランカー（初回DLあり）
+CASE_FINDER_MODEL=cl-nagoya/ruri-large \
+CASE_FINDER_RERANKER=hotchpotch/japanese-reranker-cross-encoder-large-v1 \
+python ingest.py && \
+CASE_FINDER_MODEL=cl-nagoya/ruri-large python app.py
+```
+切替に関わる環境変数: `CASE_FINDER_MODEL` / `CASE_FINDER_RERANK`(auto|off) /
+`CASE_FINDER_RERANKER` / `CASE_FINDER_HYBRID`(auto|off) / `CASE_FINDER_CHUNK_SIZE`。
+
+### 精度の測定（A/B）
+```bash
+python bench.py                          # 現設定の Recall@k / MRR / nDCG
+CASE_FINDER_HYBRID=off python bench.py   # 密のみと比較
+CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
 ```
 
 ## 構成
@@ -114,14 +135,16 @@ CASE_FINDER_MODEL=intfloat/multilingual-e5-base python ingest.py
 | `ingest.py` | PPT/PDF を読み取り（必要ならOCR）→ 仕分け → ベクトル化 → DB登録 |
 | `ocr.py` | 画像中心の資料を OCR で文字化（既定 EasyOCR / 代替 Tesseract） |
 | `extract.py` | BERT埋め込みで「課題/施策/成果」分類・業種推定 |
-| `search.py` | 埋め込み・DB・検索/グラフ・閾値/関連度の中核ロジック |
+| `search.py` | チャンク密検索＋BM25ハイブリッド＋リランク・抜粋根拠の中核 |
+| `rerank.py` | クロスエンコーダ・リランカー（未導入なら自動フォールバック） |
 | `jobs.py` | 取り込みのバックグラウンド実行＋進捗＋モデルwarmup |
 | `calibrate.py` | 評価データから閾値を校正するツール |
+| `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |
 | `app.py` | Flask サーバー（API + 画面配信 + 認証） |
-| `templates/index.html` | 画面（意味検索＋関係グラフ＋アップロード） |
-| `tests/` | スタブ埋め込みによるスモークテスト |
+| `templates/index.html` | 画面（意味検索＋関係グラフ＋根拠ハイライト＋アップロード） |
+| `tests/` | スタブ埋め込みによるスモークテスト（12件） |
 | `data/` | 事例の PPT/PDF を置く場所 |
-| `cases.db` | 事例テキスト＋ベクトルの保存先（自動生成） |
+| `cases.db` | 事例＋チャンク＋ベクトルの保存先（自動生成） |
 
 ## 今後の案
 - PaddleOCR など他エンジンの追加

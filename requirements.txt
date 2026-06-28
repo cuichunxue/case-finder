@@ -1,6 +1,7 @@
 flask>=3.0
 waitress>=3.0
 numpy>=1.24
+rank-bm25>=0.2.2
 python-pptx>=0.6.23
 PyMuPDF>=1.23
 sentence-transformers>=2.6
