@@ -273,6 +273,89 @@ def test_api_answer_with_stub(env, monkeypatch):
     assert j["model"] == "gpt-stub"
 
 
+# ── 結果キャッシュ：同一クエリは再計算せず同一オブジェクトを返す ──
+def test_result_cache(env, monkeypatch):
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    r1 = s.search("q", top_k=6)
+    r2 = s.search("q", top_k=6)
+    assert r1 is r2  # キャッシュヒット（同一オブジェクト）
+    s.invalidate_cache()
+    r3 = s.search("q", top_k=6)
+    assert r3 is not r1  # 失効後は作り直し
+
+
+# ── ANN（hnswlib）の結果が総当たりと一致（小規模・閾値を下げて検証）──
+def test_ann_matches_bruteforce(env, monkeypatch):
+    import importlib.util
+
+    import pytest
+    if importlib.util.find_spec("hnswlib") is None:
+        pytest.skip("hnswlib 未導入")
+    s = env.search
+
+    def build(cases):
+        conn = s.connect()
+        s.init_db(conn)
+        for t, src, cos in cases:
+            store_one(s, conn, t, src, cos)
+        conn.close()
+        s.invalidate_cache()
+
+    cases = [("A", "a.txt", 0.95), ("B", "b.txt", 0.88), ("C", "c.txt", 0.83)]
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.0)
+
+    build(cases)
+    monkeypatch.setattr(s, "ANN", "off")
+    s.invalidate_cache()
+    brute = [n["title"] for n in s.search("q", top_k=6)["nodes"]]
+
+    monkeypatch.setattr(s, "ANN", "on")
+    monkeypatch.setattr(s, "ANN_MIN", 1)
+    monkeypatch.setattr(s, "ANN_K", 10)
+    s.invalidate_cache()
+    assert s.get_index()["ann"] is not None      # ANN索引が構築された
+    ann = [n["title"] for n in s.search("q", top_k=6)["nodes"]]
+    assert ann == brute
+
+
+# ── 要約キャッシュ：同一クエリは synthesize を1回だけ呼ぶ ──
+def test_answer_cache(env, monkeypatch):
+    import app
+    import azure_ai
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0, text="属人化を解消した")
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    calls = {"n": 0}
+
+    def fake_synth(q, cases):
+        calls["n"] += 1
+        return {"answer": "回答 [1]", "citations": [], "model": "stub"}
+
+    monkeypatch.setattr(azure_ai, "available", lambda: True)
+    monkeypatch.setattr(azure_ai, "synthesize", fake_synth)
+    c = app.app.test_client()
+    a1 = c.get("/api/answer?q=属人化").get_json()
+    a2 = c.get("/api/answer?q=属人化").get_json()
+    assert a1["answer"] == "回答 [1]" and a2["answer"] == "回答 [1]"
+    assert calls["n"] == 1  # 2回目はキャッシュ
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

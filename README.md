@@ -95,6 +95,8 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_BM25_SAT` | `6.0` | BM25生スコアを0-1関連度に飽和変換する係数 |
 | `CASE_FINDER_RERANK` / `_RERANKER` | `auto` / 日本語CE | リランカーの有効化とモデル |
 | `CASE_FINDER_HYBRID` | `auto` | BM25ハイブリッドの有効化（`off`で密のみ） |
+| `CASE_FINDER_ANN` / `_ANN_MIN` / `_ANN_K` | `auto` / `2000` / `200` | 大規模時にhnswlibで密検索を近似高速化 |
+| `CASE_FINDER_CACHE_SIZE` / `_CACHE_TTL` | `256` / `300` | 結果・要約キャッシュのサイズ/秒 |
 | `CASE_FINDER_OCR_ENGINE` | `easyocr` | `easyocr` / `tesseract` / `auto` |
 | `CASE_FINDER_INDUSTRIES` | （内蔵リスト） | 業種候補をカンマ区切りで上書き |
 | `CASE_FINDER_PASSWORD` | （なし） | 全体のBasic認証パスワード |
@@ -152,7 +154,8 @@ pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR/
 - **抜粋根拠**: ヒットの該当チャンクとクエリ語のハイライトで「なぜ近いか」を提示（生成なし）
 - 課題/施策/成果の仕分け・業種推定: 見出し検出 ＋ BERT埋め込みのゼロショット分類
 - 関連度: 生コサインを閾値で足切りし、表示用に 0〜100% へ伸縮（無関係を出さない）
-- 高速化: 起動時にインデックスをメモリ保持＋モデルwarmup。取り込み時に自動更新
+- 高速化: 起動時にインデックスをメモリ保持＋モデルwarmup、結果/要約のTTLキャッシュ、
+  大規模時は hnswlib による近似最近傍(ANN)。取り込み時に自動更新
 - 保存: SQLite（`cases.db`、事例＋チャンク）。再起動しても再計算不要
 
 ### 精度を上げる（LLM同等以上を狙う設定）

@@ -18,7 +18,11 @@ import math
 import os
 import sys
 
+import azure_ai
 import search
+
+# 評価中は Azure クエリ拡張(HyDE)を無効化（静かな課金と非決定性を避ける）
+azure_ai.EXPAND_ON = False
 
 
 def load_eval(path):

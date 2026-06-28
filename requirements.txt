@@ -13,6 +13,8 @@ Pillow>=10.0
 #   macOS : brew install tesseract tesseract-lang
 #   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
 #   pip   : pip install pytesseract
+# 大規模(数万件〜)で密検索を高速化する場合（任意・未導入なら総当たり）: pip install hnswlib
+# hnswlib>=0.8
 # 開発・テスト用（任意）: pip install pytest
 # Azure 生成AI（任意の選択機能）。有効化する場合のみ: pip install openai
 # openai>=1.30

@@ -22,10 +22,21 @@ from functools import lru_cache
 import numpy as np
 
 import azure_ai
+import cache
 import rerank
 
 # 埋め込みバックエンド: local（既定・完全ローカル）/ azure（Azure OpenAI 埋め込み）
 EMBED_BACKEND = os.environ.get("CASE_FINDER_EMBED_BACKEND", "local").lower()
+
+# 近似最近傍(ANN)。大規模時のみ自動的に密検索を高速化（hnswlib）。
+ANN = os.environ.get("CASE_FINDER_ANN", "auto").lower()  # auto|on|off
+ANN_MIN = int(os.environ.get("CASE_FINDER_ANN_MIN", "2000"))  # この件数以上で有効化
+ANN_K = int(os.environ.get("CASE_FINDER_ANN_K", "200"))       # 取得する近傍チャンク数
+
+# 結果キャッシュ（同一クエリの再計算・Azure課金を削減）
+CACHE_SIZE = int(os.environ.get("CASE_FINDER_CACHE_SIZE", "256"))
+CACHE_TTL = float(os.environ.get("CASE_FINDER_CACHE_TTL", "300"))
+_RESULT_CACHE = cache.TTLCache(CACHE_SIZE, CACHE_TTL)
 
 # ──────────────────────────────────────────────────────────────
 # 設定
@@ -273,10 +284,29 @@ def _build_index(conn):
         except Exception:  # noqa: BLE001
             bm25 = None
 
+    ann = _build_ann(chunk_emb)
+
     return {
         "meta": meta, "case_vec": case_vec, "chunk_emb": chunk_emb,
-        "chunk_text": chunk_text, "chunk_by_case": chunk_by_case, "bm25": bm25,
+        "chunk_text": chunk_text, "chunk_by_case": chunk_by_case, "bm25": bm25, "ann": ann,
     }
+
+
+def _build_ann(chunk_emb):
+    """大規模時のみ hnswlib で密検索を近似高速化（小規模・未導入はNone=総当たり）。"""
+    if ANN == "off" or chunk_emb.size == 0 or chunk_emb.shape[0] < ANN_MIN:
+        return None
+    try:
+        import hnswlib
+
+        n, d = chunk_emb.shape
+        idx = hnswlib.Index(space="cosine", dim=d)
+        idx.init_index(max_elements=n, ef_construction=200, M=16)
+        idx.add_items(chunk_emb, np.arange(n))
+        idx.set_ef(max(ANN_K, 64))
+        return idx
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def get_index():
@@ -297,6 +327,12 @@ def invalidate_cache():
     global _INDEX
     with _LOCK:
         _INDEX = None
+    _RESULT_CACHE.clear()
+
+
+def index_version():
+    """キャッシュキー用のインデックス版（DB更新で変わる）。"""
+    return _db_mtime()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -331,7 +367,16 @@ def _rank_cases(ix, query):
             f"（クエリ {qv.shape[0]} 次元 / 保存 {chunk_emb.shape[1]} 次元）。"
             "EMBED_BACKEND を変更した場合は `python ingest.py` で再取り込みしてください。"
         )
-    chunk_cos = chunk_emb @ qv  # (M,)
+
+    M = chunk_emb.shape[0]
+    if ix.get("ann") is not None:
+        # ANN: 上位近傍チャンクだけ取得（取得外は -1 とし、対象事例を絞る）
+        k = min(ANN_K, M)
+        labels, dists = ix["ann"].knn_query(qv, k=k)
+        chunk_cos = np.full(M, -1.0, dtype=np.float32)
+        chunk_cos[labels[0]] = (1.0 - dists[0]).astype(np.float32)
+    else:
+        chunk_cos = chunk_emb @ qv  # (M,) 総当たり
 
     case_cos = np.full(C, -1.0)
     best = np.zeros(C, dtype=np.int64)
@@ -406,8 +451,16 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     """足切り・表示%・並び順をすべて統一関連度 rel で判断する。"""
     if min_rel is None:
         min_rel = MIN_REL
+    if not query.strip():
+        return {"nodes": [], "edges": [], "hidden": 0}
+
+    ckey = (query, industry, top_k, round(min_rel, 6), _db_mtime())
+    cached = _RESULT_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
     ix = get_index()
-    if not ix["meta"] or not query.strip():
+    if not ix["meta"]:
         return {"nodes": [], "edges": [], "hidden": 0}
 
     nodes, hidden = [], 0
@@ -434,7 +487,9 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     edges = _edges(nodes, ix["case_vec"])
     for n in nodes:
         n.pop("_idx", None)
-    return {"nodes": nodes, "edges": edges, "hidden": hidden}
+    result = {"nodes": nodes, "edges": edges, "hidden": hidden}
+    _RESULT_CACHE.put(ckey, result)
+    return result
 
 
 def _edges(nodes, case_vec):
@@ -463,5 +518,6 @@ def stats():
         "industries": sorted({m["industry"] for m in ix["meta"] if m["industry"]}),
         "hybrid": ix["bm25"] is not None,
         "reranker": rerank.available(),
+        "ann": ix.get("ann") is not None,
         "azure": az,
     }

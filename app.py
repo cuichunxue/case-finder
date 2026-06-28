@@ -23,12 +23,19 @@ from flask import (
 )
 
 import azure_ai
+import cache
 import ingest
 import jobs
 import ocr
 import search
 
 app = Flask(__name__)
+
+# Azure 要約のキャッシュ（同一クエリの再課金を回避）
+_ANSWER_CACHE = cache.TTLCache(
+    int(os.environ.get("CASE_FINDER_ANSWER_CACHE_SIZE", "128")),
+    float(os.environ.get("CASE_FINDER_CACHE_TTL", "300")),
+)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("CASE_FINDER_MAX_MB", "64")) * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -121,12 +128,20 @@ def api_answer():
         return jsonify({**result, "answer": None, "reason": "Azure未設定"})
     if not nodes:
         return jsonify({**result, "answer": None, "reason": "該当事例なし"})
+
+    # 同一クエリの要約はキャッシュから返す（Azure課金を回避）
+    akey = (q, industry, top_k, (min_rel if min_rel is not None else "d"), search.index_version())
+    hit = _ANSWER_CACHE.get(akey)
+    if hit is not None:
+        return jsonify(hit)
     try:
         out = azure_ai.synthesize(q, nodes)
     except Exception as e:  # noqa: BLE001
         return jsonify({**result, "answer": None, "reason": f"生成に失敗: {e}"})
-    return jsonify({**result, "answer": out["answer"],
-                    "citations": out["citations"], "model": out.get("model")})
+    payload = {**result, "answer": out["answer"],
+               "citations": out["citations"], "model": out.get("model")}
+    _ANSWER_CACHE.put(akey, payload)
+    return jsonify(payload)
 
 
 @app.route("/api/upload", methods=["POST"])
