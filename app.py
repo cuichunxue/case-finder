@@ -83,9 +83,9 @@ def api_search():
     q = request.args.get("q", "").strip()
     industry = request.args.get("industry", "").strip()
     top_k = int(request.args.get("k", 6))
-    # loose=1 で「関連が弱い候補」も含める（閾値を WEAK_FLOOR まで下げる）
-    min_score = search.WEAK_FLOOR if request.args.get("loose") else None
-    return jsonify(search.search(q, top_k=top_k, industry=industry, min_score=min_score))
+    # loose=1 で「関連が弱い候補」も含める（足切りを WEAK_REL まで下げる）
+    min_rel = search.WEAK_REL if request.args.get("loose") else None
+    return jsonify(search.search(q, top_k=top_k, industry=industry, min_rel=min_rel))
 
 
 @app.route("/api/stats")

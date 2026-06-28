@@ -78,11 +78,18 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 出力された `CASE_FINDER_MIN_SCORE` 等を環境変数に設定して再起動すると反映されます。
 
 ### 主な環境変数
+関連度は密検索・BM25・リランカーの判断を **0〜1 の統一スコア(rel)** にまとめ、
+足切り・表示%・並び順をすべて rel で一貫させています（語彙ヒットやリランク上位が
+密の閾値で消える問題を解消）。
+
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `CASE_FINDER_MIN_SCORE` | `0.80` | これ未満の関連度は検索結果から除外 |
-| `CASE_FINDER_WEAK_FLOOR` | `MIN_SCORE-0.08` | 「弱い候補も表示」で使う下限 |
-| `CASE_FINDER_REL_FLOOR` / `_REL_CEIL` | `0.78` / `0.92` | 関連度0〜100%表示の伸縮範囲 |
+| `CASE_FINDER_MIN_REL` | `0.40` | これ未満は検索結果から除外（統一関連度） |
+| `CASE_FINDER_WEAK_REL` | `0.15` | 「弱い候補も表示」で使う下限（統一関連度） |
+| `CASE_FINDER_REL_FLOOR` / `_REL_CEIL` | `WEAK_FLOOR` / `0.92` | 密コサイン→関連度の伸縮範囲 |
+| `CASE_FINDER_BM25_SAT` | `6.0` | BM25生スコアを0-1関連度に飽和変換する係数 |
+| `CASE_FINDER_RERANK` / `_RERANKER` | `auto` / 日本語CE | リランカーの有効化とモデル |
+| `CASE_FINDER_HYBRID` | `auto` | BM25ハイブリッドの有効化（`off`で密のみ） |
 | `CASE_FINDER_OCR_ENGINE` | `easyocr` | `easyocr` / `tesseract` / `auto` |
 | `CASE_FINDER_INDUSTRIES` | （内蔵リスト） | 業種候補をカンマ区切りで上書き |
 | `CASE_FINDER_PASSWORD` | （なし） | 全体のBasic認証パスワード |

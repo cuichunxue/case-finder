@@ -16,8 +16,10 @@ from conftest import store_one
 
 
 def _q10(monkeypatch, s):
-    """クエリ埋め込みを [1,0] 固定にする（store_one の2次元ベクトルと整合）。"""
+    """クエリ埋め込みを [1,0] 固定にし、関連度=コサインになるよう伸縮を無効化。"""
     monkeypatch.setattr(s, "embed", lambda texts, kind: np.array([[1.0, 0.0]], dtype=np.float32))
+    monkeypatch.setattr(s, "REL_FLOOR", 0.0)
+    monkeypatch.setattr(s, "REL_CEIL", 1.0)
 
 
 # ── 課題/施策/成果の抽出（見出しパス）──
@@ -48,15 +50,17 @@ def test_search_threshold_and_hidden(env, monkeypatch):
     conn.close()
     s.invalidate_cache()
 
-    _q10(monkeypatch, s)
-    monkeypatch.setattr(s, "MIN_SCORE", 0.80)
-    monkeypatch.setattr(s, "WEAK_FLOOR", 0.75)
+    _q10(monkeypatch, s)  # rel = cos
+    monkeypatch.setattr(s, "MIN_REL", 0.80)
+    monkeypatch.setattr(s, "WEAK_REL", 0.75)
 
     r = s.search("q", top_k=6)
     assert [n["title"] for n in r["nodes"]] == ["A", "B"]
     assert r["hidden"] == 1
+    # 表示順と関連度%が一致（降順）すること
+    assert r["nodes"][0]["relevance"] >= r["nodes"][1]["relevance"]
 
-    r2 = s.search("q", top_k=6, min_score=s.WEAK_FLOOR)
+    r2 = s.search("q", top_k=6, min_rel=s.WEAK_REL)
     assert "C" in [n["title"] for n in r2["nodes"]]
 
 
@@ -70,7 +74,7 @@ def test_industry_filter(env, monkeypatch):
     conn.close()
     s.invalidate_cache()
     _q10(monkeypatch, s)
-    r = s.search("q", top_k=6, industry="製造", min_score=0.0)
+    r = s.search("q", top_k=6, industry="製造", min_rel=0.0)
     assert [n["title"] for n in r["nodes"]] == ["M"]
     assert s.list_industries() == ["小売・EC", "製造"]
 
@@ -138,12 +142,14 @@ def test_reranker_reorders(env, monkeypatch):
     conn.close()
     s.invalidate_cache()
     _q10(monkeypatch, s)
-    monkeypatch.setattr(s, "MIN_SCORE", 0.5)
-    # 候補順 [A, B] に対し B を高評価にするリランカーを差し込む
+    monkeypatch.setattr(s, "MIN_REL", 0.4)
+    # 候補（融合順 A,B）に対し B を高評価にするリランカーを差し込む
     monkeypatch.setattr(env.rerank, "available", lambda: True)
     monkeypatch.setattr(env.rerank, "rerank", lambda q, texts: [0.0, 1.0])
     r = s.search("q", top_k=6)
+    # リランカーの判断（B優位）が並び順・関連度に反映される
     assert [n["title"] for n in r["nodes"]] == ["B", "A"]
+    assert r["nodes"][0]["relevance"] >= r["nodes"][1]["relevance"]
 
 
 # ── API: stats / search（evidence・matched付き）──
@@ -157,7 +163,7 @@ def test_api_stats_and_search(env, monkeypatch):
     conn.close()
     s.invalidate_cache()
     _q10(monkeypatch, s)
-    monkeypatch.setattr(s, "MIN_SCORE", 0.5)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
 
     c = app.app.test_client()
     st = c.get("/api/stats").get_json()

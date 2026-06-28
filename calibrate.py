@@ -98,11 +98,14 @@ def main(argv):
 
     # 推奨値の提示
     rel_floor = round(float(np.percentile(neg_a, 90)), 2)   # 不正解の上側 ≒ 0% 表示の下限
-    rel_ceil = round(float(np.percentile(pos_a, 75)), 2)    # 正解の中位 ≒ 100% 表示の上限
-    print("\n=== 推奨値 ===")
-    print(f"  CASE_FINDER_MIN_SCORE = {best[0]:.2f}   （最良F1 {best[1]:.2f}）")
+    rel_ceil = round(max(float(np.percentile(pos_a, 75)), rel_floor + 0.05), 2)  # 正解中位 ≒ 100%
+    # 足切りは関連度(0-1)空間。最良コサイン閾値を rel に換算して MIN_REL を提示。
+    span = rel_ceil - rel_floor
+    min_rel = round(max(0.0, min(1.0, (best[0] - rel_floor) / span)) if span > 0 else 0.4, 2)
+    print("\n=== 推奨値（密検索のみの目安。ハイブリッド/リランカー併用時は bench.py で再確認）===")
     print(f"  CASE_FINDER_REL_FLOOR = {rel_floor:.2f}")
-    print(f"  CASE_FINDER_REL_CEIL  = {max(rel_ceil, rel_floor + 0.05):.2f}")
+    print(f"  CASE_FINDER_REL_CEIL  = {rel_ceil:.2f}")
+    print(f"  CASE_FINDER_MIN_REL   = {min_rel:.2f}   （最良F1 {best[1]:.2f} のコサイン {best[0]:.2f} を換算）")
     print("\n環境変数に設定して app.py / ingest.py を再実行すると反映されます。")
 
 

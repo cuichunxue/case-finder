@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sqlite3
@@ -33,9 +34,16 @@ MODEL_NAME = os.environ.get("CASE_FINDER_MODEL", "intfloat/multilingual-e5-small
 
 MIN_SCORE = float(os.environ.get("CASE_FINDER_MIN_SCORE", "0.80"))
 WEAK_FLOOR = float(os.environ.get("CASE_FINDER_WEAK_FLOOR", str(max(0.0, MIN_SCORE - 0.08))))
-REL_FLOOR = float(os.environ.get("CASE_FINDER_REL_FLOOR", "0.78"))
+# 密コサイン → 関連度(0-1) の伸縮範囲。下限は WEAK_FLOOR に揃える（弱い帯を表現可能に）。
+REL_FLOOR = float(os.environ.get("CASE_FINDER_REL_FLOOR", str(WEAK_FLOOR)))
 REL_CEIL = float(os.environ.get("CASE_FINDER_REL_CEIL", "0.92"))
 EDGE_FLOOR = float(os.environ.get("CASE_FINDER_EDGE_FLOOR", "0.82"))
+
+# 関連度(0-1)空間での単一の足切り。密/ハイブリッド/リランカーすべてここに集約する。
+MIN_REL = float(os.environ.get("CASE_FINDER_MIN_REL", "0.40"))
+WEAK_REL = float(os.environ.get("CASE_FINDER_WEAK_REL", "0.15"))
+# BM25 生スコアを 0-1 に飽和変換する係数（語彙一致の関連度化）。
+BM25_SAT = float(os.environ.get("CASE_FINDER_BM25_SAT", "6.0"))
 
 HYBRID = os.environ.get("CASE_FINDER_HYBRID", "auto")  # auto|off
 RRF_K = int(os.environ.get("CASE_FINDER_RRF_K", "60"))
@@ -63,6 +71,30 @@ def relevance(cos: float) -> float:
     if REL_CEIL <= REL_FLOOR:
         return max(0.0, min(1.0, cos))
     return max(0.0, min(1.0, (cos - REL_FLOOR) / (REL_CEIL - REL_FLOOR)))
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def _lex_rel(bm: float) -> float:
+    """BM25 生スコアを 0-1 の関連度へ飽和変換する。"""
+    return bm / (bm + BM25_SAT) if bm > 0 else 0.0
+
+
+def candidate_relevance(c: dict) -> float:
+    """候補の統一関連度(0-1)。判断に使った信号を優先する。
+
+      - リランカーが効いた候補 -> sigmoid(リランクスコア)
+      - それ以外               -> 密の関連度と語彙(BM25)関連度の大きい方
+    これにより「足切り・表示%・並び順」がすべて同じ尺度になる。
+    """
+    if c.get("rr") is not None:
+        return _sigmoid(c["rr"])
+    rel = relevance(c["cos"])
+    if c.get("bm") is not None:
+        rel = max(rel, _lex_rel(c["bm"]))
+    return rel
 
 
 # ──────────────────────────────────────────────────────────────
@@ -291,8 +323,9 @@ def _rank_cases(ix, query):
         case_cos[pos] = float(sub[j])
         best[pos] = cis[j]
 
-    # ハイブリッド（BM25 を RRF 融合）
+    # ハイブリッド（BM25 を RRF 融合）。融合順は「どれをリランクするか」の選別に使う。
     rank_dense = _ranks(np.argsort(-case_cos))
+    case_bm = None
     if ix["bm25"] is not None:
         cb = np.asarray(ix["bm25"].get_scores(tokenize(query)))
         case_bm = np.zeros(C)
@@ -304,29 +337,43 @@ def _rank_cases(ix, query):
     else:
         fused = 1.0 / (RRF_K + rank_dense)
 
-    cand = list(np.argsort(-fused))
+    cand = [int(p) for p in np.argsort(-fused)]
 
-    # クロスエンコーダ・リランク（上位のみ）
+    # クロスエンコーダ・リランク（融合上位のみにスコアを付与）
+    rr_by_pos = {}
     if rerank.available() and cand:
         topN = cand[:RERANK_TOP]
         texts = [ix["chunk_text"][int(best[pos])] for pos in topN]
         scores = rerank.rerank(query, texts)
         if scores is not None:
-            reordered = [pos for _, pos in sorted(zip(scores, topN), key=lambda x: -x[0])]
-            cand = reordered + cand[RERANK_TOP:]
+            for pos, sc in zip(topN, scores):
+                rr_by_pos[pos] = float(sc)
 
-    return [{"pos": int(pos), "cos": float(case_cos[pos]), "best": int(best[pos])} for pos in cand]
+    return [
+        {"pos": pos, "cos": float(case_cos[pos]), "best": int(best[pos]),
+         "rr": rr_by_pos.get(pos), "bm": (float(case_bm[pos]) if case_bm is not None else None)}
+        for pos in cand
+    ]
+
+
+def _scored(ix, query: str, industry: str = ""):
+    """候補に統一関連度 rel を付与し、rel 降順で返す（業種フィルタ済み）。"""
+    out = []
+    for c in _rank_cases(ix, query):
+        if industry and ix["meta"][c["pos"]]["industry"] != industry:
+            continue
+        c["rel"] = candidate_relevance(c)
+        out.append(c)
+    out.sort(key=lambda c: -c["rel"])
+    return out
 
 
 def ranked_sources(query: str, industry: str = "", limit: int = 50):
-    """評価用：閾値・top_kを無視した事例ソースの関連順リスト。"""
+    """評価用：閾値・top_kを無視した、関連度順の事例ソース列。"""
     ix = get_index()
     out = []
-    for r in _rank_cases(ix, query):
-        m = ix["meta"][r["pos"]]
-        if industry and m["industry"] != industry:
-            continue
-        out.append(m["source"])
+    for c in _scored(ix, query, industry):
+        out.append(ix["meta"][c["pos"]]["source"])
         if len(out) >= limit:
             break
     return out
@@ -335,34 +382,33 @@ def ranked_sources(query: str, industry: str = "", limit: int = 50):
 # ──────────────────────────────────────────────────────────────
 # 検索（表示用）
 # ──────────────────────────────────────────────────────────────
-def search(query: str, top_k: int = 6, industry: str = "", min_score: float | None = None):
-    if min_score is None:
-        min_score = MIN_SCORE
+def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None = None):
+    """足切り・表示%・並び順をすべて統一関連度 rel で判断する。"""
+    if min_rel is None:
+        min_rel = MIN_REL
     ix = get_index()
     if not ix["meta"] or not query.strip():
         return {"nodes": [], "edges": [], "hidden": 0}
 
     nodes, hidden = [], 0
-    for r in _rank_cases(ix, query):
-        cos = r["cos"]
-        if cos < WEAK_FLOOR:
-            continue  # リランク後は順序が類似度降順とは限らないため break しない
-        m = ix["meta"][r["pos"]]
-        if industry and m["industry"] != industry:
+    for c in _scored(ix, query, industry):
+        rel = c["rel"]
+        if rel < WEAK_REL:
             continue
-        if cos < min_score:
+        if rel < min_rel:
             hidden += 1
             continue
         if len(nodes) >= top_k:
             continue
-        evidence = ix["chunk_text"][r["best"]]
+        m = ix["meta"][c["pos"]]
+        evidence = ix["chunk_text"][c["best"]]
         nodes.append({
             "id": m["id"], "title": m["title"], "source": m["source"], "excerpt": m["excerpt"],
             "industry": m["industry"], "problem": m["problem"], "action": m["action"], "result": m["result"],
-            "score": cos, "relevance": relevance(cos),
+            "score": c["cos"], "relevance": rel,
             "evidence": evidence[:300] + ("…" if len(evidence) > 300 else ""),
             "matched": matched_spans(query, evidence),
-            "_idx": r["pos"],
+            "_idx": c["pos"],
         })
 
     edges = _edges(nodes, ix["case_vec"])
