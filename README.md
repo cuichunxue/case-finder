@@ -17,12 +17,17 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 ```bash
 python -m venv .venv && source .venv/bin/activate   # 任意
 pip install -r requirements.txt
-
-# OCR を使う場合は Tesseract 本体も導入（任意・画像中心の資料向け）
-#   macOS : brew install tesseract tesseract-lang
-#   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
 ```
-Tesseract が無くてもテキスト層のある PPT/PDF はそのまま取り込めます
+OCR の既定エンジンは **EasyOCR**（Apache-2.0・商用利用可）です。`requirements.txt` に含まれ、
+日本語モデルは初回の取り込み時に自動ダウンロードされます。追加導入は不要です。
+
+OCR エンジンは環境変数で切り替えられます:
+```bash
+CASE_FINDER_OCR_ENGINE=easyocr    # 既定（高精度・pipのみ）
+CASE_FINDER_OCR_ENGINE=tesseract  # 軽量。別途 Tesseract 本体の導入が必要
+CASE_FINDER_OCR_ENGINE=auto       # EasyOCRがあれば優先、無ければTesseract
+```
+OCR エンジンが無くても、テキスト層のある PPT/PDF はそのまま取り込めます
 （OCR は自動で有効/無効を判定します）。
 
 ## 使い方
@@ -43,7 +48,7 @@ Tesseract が無くてもテキスト層のある PPT/PDF はそのまま取り�
 
 ## 仕組み（生成AI不使用）
 - 抽出: `PyMuPDF`（PDF）/ `python-pptx`（PPT）
-- OCR: `Tesseract`（`pytesseract`）。テキスト層が乏しいページ/画像スライドを自動でOCR
+- OCR: 既定は `EasyOCR`（Apache-2.0・商用可）、代替で `Tesseract`。テキスト層が乏しいページ/画像スライドを自動でOCR
 - 意味ベクトル: `sentence-transformers` の `intfloat/multilingual-e5-small`
   （XLM-RoBERTa ＝ BERT 系エンコーダ。生成LLMではありません）
 - 課題/施策/成果の仕分け: 見出し検出 ＋ **BERT埋め込みのゼロショット分類**
@@ -60,7 +65,7 @@ CASE_FINDER_MODEL=intfloat/multilingual-e5-base python ingest.py
 | ファイル | 役割 |
 |---|---|
 | `ingest.py` | PPT/PDF を読み取り（必要ならOCR）→ 仕分け → ベクトル化 → DB登録 |
-| `ocr.py` | 画像中心の資料を Tesseract で文字化 |
+| `ocr.py` | 画像中心の資料を OCR で文字化（既定 EasyOCR / 代替 Tesseract） |
 | `extract.py` | BERT埋め込みで「課題/施策/成果」に分類 |
 | `search.py` | 埋め込み・DB・検索/グラフの中核ロジック |
 | `app.py` | Flask サーバー（API + 画面配信） |
@@ -69,6 +74,6 @@ CASE_FINDER_MODEL=intfloat/multilingual-e5-base python ingest.py
 | `cases.db` | 事例テキスト＋ベクトルの保存先（自動生成） |
 
 ## 今後の案
-- OCR エンジンの選択肢追加（EasyOCR / PaddleOCR など、より高精度な日本語OCR）
+- PaddleOCR など他エンジンの追加
 - 画面からのアップロードで取り込み
 - 分類しきい値やラベル代表文の調整UI

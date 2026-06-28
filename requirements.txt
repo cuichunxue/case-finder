@@ -3,8 +3,11 @@ numpy>=1.24
 python-pptx>=0.6.23
 PyMuPDF>=1.23
 sentence-transformers>=2.6
-# OCR（画像中心のPPT/PDF用）。別途 Tesseract 本体の導入が必要:
+# OCR（画像中心のPPT/PDF用）。既定エンジン = EasyOCR（Apache-2.0・商用利用可）
+# pip のみで導入でき、日本語モデルは初回実行時に自動DLされます。
+easyocr>=1.7
+Pillow>=10.0
+# 代替エンジン Tesseract を使う場合（CASE_FINDER_OCR_ENGINE=tesseract）:
 #   macOS : brew install tesseract tesseract-lang
 #   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
-pytesseract>=0.3.10
-Pillow>=10.0
+#   pip   : pip install pytesseract

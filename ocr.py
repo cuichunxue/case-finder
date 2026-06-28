@@ -1,25 +1,66 @@
-"""画像ベースの PPT/PDF から文字を読み取る OCR モジュール（Tesseract 日本語）。
+"""画像ベースの PPT/PDF から文字を読み取る OCR モジュール（生成AI不使用）。
 
-生成AI（LLM）は使いません。テキスト層を持たないスキャンPDFや、
-文字が画像化されたスライドから文字を取り出すために使います。
+テキスト層を持たないスキャンPDFや、文字が画像化されたスライドから
+文字を取り出すために使います。エンジンは環境変数で選べます:
 
-必要なもの（OSパッケージ）:
-    macOS : brew install tesseract tesseract-lang
-    Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
-そのうえで: pip install pytesseract Pillow
+    CASE_FINDER_OCR_ENGINE = easyocr (既定) | tesseract | auto
+
+- EasyOCR  : 日本語精度が高い。Apache-2.0 で商用利用可。pip のみで導入可（モデルは初回DL）。
+                pip install easyocr
+- Tesseract: 軽量。OS本体の導入が必要。
+                macOS : brew install tesseract tesseract-lang
+                Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
+                pip   : pip install pytesseract Pillow
+
+どちらも未導入なら OCR は自動でスキップされ、テキスト層のみ取り込みます。
 """
 
 from __future__ import annotations
 
 import io
 import os
+from functools import lru_cache
 
-OCR_LANG = os.environ.get("CASE_FINDER_OCR_LANG", "jpn+eng")
+ENGINE = os.environ.get("CASE_FINDER_OCR_ENGINE", "easyocr").lower()
 OCR_DPI = int(os.environ.get("CASE_FINDER_OCR_DPI", "220"))
+# EasyOCR の言語（日本語＋英語）。Tesseract は "jpn+eng"。
+EASYOCR_LANGS = os.environ.get("CASE_FINDER_OCR_LANG_EASYOCR", "ja,en").split(",")
+TESSERACT_LANG = os.environ.get("CASE_FINDER_OCR_LANG_TESSERACT", "jpn+eng")
 
 
-def available() -> bool:
-    """Tesseract 本体が使えるか。未導入なら OCR をスキップする判断に使う。"""
+# ──────────────────────────────────────────────────────────────
+# EasyOCR
+# ──────────────────────────────────────────────────────────────
+def _easyocr_installed() -> bool:
+    try:
+        import easyocr  # noqa: F401
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@lru_cache(maxsize=1)
+def _easyocr_reader():
+    import easyocr
+
+    # gpu=False で CPU 動作。モデルは初回のみ自動ダウンロード。
+    return easyocr.Reader(EASYOCR_LANGS, gpu=False, verbose=False)
+
+
+def _easyocr_image(img_bytes: bytes) -> str:
+    import numpy as np
+    from PIL import Image
+
+    img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+    lines = _easyocr_reader().readtext(img, detail=0, paragraph=True)
+    return "\n".join(lines).strip()
+
+
+# ──────────────────────────────────────────────────────────────
+# Tesseract
+# ──────────────────────────────────────────────────────────────
+def _tesseract_installed() -> bool:
     try:
         import pytesseract
 
@@ -29,15 +70,49 @@ def available() -> bool:
         return False
 
 
-def ocr_image_bytes(img_bytes: bytes, lang: str = OCR_LANG) -> str:
+def _tesseract_image(img_bytes: bytes) -> str:
     from PIL import Image
     import pytesseract
 
     img = Image.open(io.BytesIO(img_bytes))
-    return pytesseract.image_to_string(img, lang=lang).strip()
+    return pytesseract.image_to_string(img, lang=TESSERACT_LANG).strip()
 
 
-def ocr_pdf_page(page, lang: str = OCR_LANG, dpi: int = OCR_DPI) -> str:
+# ──────────────────────────────────────────────────────────────
+# エンジン選択
+# ──────────────────────────────────────────────────────────────
+def _active_engine() -> str | None:
+    """実際に使えるエンジン名を返す。使えなければ None。"""
+    if ENGINE == "easyocr":
+        return "easyocr" if _easyocr_installed() else None
+    if ENGINE == "tesseract":
+        return "tesseract" if _tesseract_installed() else None
+    # auto: EasyOCR を優先
+    if _easyocr_installed():
+        return "easyocr"
+    if _tesseract_installed():
+        return "tesseract"
+    return None
+
+
+def available() -> bool:
+    return _active_engine() is not None
+
+
+def engine_name() -> str:
+    return _active_engine() or "なし"
+
+
+def ocr_image_bytes(img_bytes: bytes) -> str:
+    eng = _active_engine()
+    if eng == "easyocr":
+        return _easyocr_image(img_bytes)
+    if eng == "tesseract":
+        return _tesseract_image(img_bytes)
+    return ""
+
+
+def ocr_pdf_page(page) -> str:
     """PyMuPDF のページを画像化して OCR する。"""
-    pix = page.get_pixmap(dpi=dpi)
-    return ocr_image_bytes(pix.tobytes("png"), lang=lang)
+    pix = page.get_pixmap(dpi=OCR_DPI)
+    return ocr_image_bytes(pix.tobytes("png"))

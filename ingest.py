@@ -127,7 +127,7 @@ def main(argv):
         return
 
     ocr_ok = ocr.available()
-    print(f"OCR: {'有効（Tesseract検出）' if ocr_ok else '無効（Tesseract未検出。テキスト層のみ取り込み）'}")
+    print(f"OCR: {'有効（エンジン: ' + ocr.engine_name() + '）' if ocr_ok else '無効（OCRエンジン未検出。テキスト層のみ取り込み）'}")
     print(f"埋め込みモデルを準備中…（初回のみダウンロード）")
     ok = 0
     for path in targets:
