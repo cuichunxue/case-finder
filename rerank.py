@@ -27,9 +27,10 @@ def _load():
     if _state["model"] is not None:
         return _state["model"]
     try:
+        import device
         from sentence_transformers import CrossEncoder
 
-        _state["model"] = CrossEncoder(MODEL_NAME, max_length=512)
+        _state["model"] = CrossEncoder(MODEL_NAME, max_length=512, device=device.resolve())
         return _state["model"]
     except Exception:  # noqa: BLE001
         _state["failed"] = True  # 一度失敗したら以後は試さない

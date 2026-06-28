@@ -138,6 +138,7 @@ async function loadStats(){
   try{
     const s = await (await fetch("/api/stats")).json();
     const modes = [s.hybrid ? "ハイブリッド" : "密のみ", s.reranker ? "リランカー有" : "リランカー無"];
+    if(s.device && s.device !== "cpu") modes.push("GPU:" + s.device);
     if(s.azure && s.azure.synth) modes.push("Azure要約可");
     $("#metatext").textContent = `登録事例 ${s.count} 件 ・ ${s.model} ・ ${modes.join(" / ")}`;
     $("#aiWrap").style.display = (s.azure && s.azure.synth) ? "flex" : "none";

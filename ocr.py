@@ -44,8 +44,10 @@ def _easyocr_installed() -> bool:
 def _easyocr_reader():
     import easyocr
 
-    # gpu=False で CPU 動作。モデルは初回のみ自動ダウンロード。
-    return easyocr.Reader(EASYOCR_LANGS, gpu=False, verbose=False)
+    import device
+
+    # GPUが使えれば利用（CASE_FINDER_DEVICE）。モデルは初回のみ自動ダウンロード。
+    return easyocr.Reader(EASYOCR_LANGS, gpu=device.use_gpu(), verbose=False)
 
 
 def _easyocr_image(img_bytes: bytes) -> str:

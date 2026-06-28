@@ -71,6 +71,8 @@ def _unauthorized():
 
 # 外部送信・課金を伴う読み取り系も「書き込み相当」として保護する
 PRIVILEGED_PATHS = {"/api/answer", "/api/answer_stream"}
+# 認証を常に通すパス（監視用ヘルスチェック）
+PUBLIC_PATHS = {"/healthz"}
 
 
 @app.before_request
@@ -96,6 +98,8 @@ def _access_log(resp):
 
 @app.before_request
 def _require_auth():
+    if request.path in PUBLIC_PATHS:
+        return None
     is_write = request.method in ("POST", "PUT", "DELETE") or request.path in PRIVILEGED_PATHS
     if is_write:
         # 書き込みは、全体パスワードか書き込み専用パスワードのいずれかで許可
@@ -119,6 +123,16 @@ def _safe_filename(name: str) -> str:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/healthz")
+def healthz():
+    """監視/自動再起動用の軽量ヘルスチェック（認証不要・モデルロードなし）。"""
+    try:
+        n = len(search.get_index()["meta"])
+        return jsonify({"status": "ok", "cases": n})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"status": "error", "detail": str(e)}), 500
 
 
 @app.route("/api/search")
@@ -277,24 +291,29 @@ def api_answer_stream():
 @app.route("/data/<path:filename>")
 def data_file(filename):
     """検索結果から元の PPT/PDF を開けるようにする。"""
-    return send_from_directory(os.path.join(BASE_DIR, "data"), filename)
+    return send_from_directory(search.DATA_DIR, filename)
 
 
 def _run():
     port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("CASE_FINDER_HOST", "0.0.0.0")
     if not AUTH_PASSWORD and not WRITE_PASSWORD:
         print("※ 認証なしで公開します（読み書きとも自由）。社外秘なら CASE_FINDER_PASSWORD"
               " か CASE_FINDER_WRITE_PASSWORD の設定を推奨。")
     elif WRITE_PASSWORD and not AUTH_PASSWORD:
         print("※ 読み取りは無認証です。検索結果や元ファイル(/data)も誰でも閲覧できます。"
               "社外秘の本文を守るには CASE_FINDER_PASSWORD（全体認証）を推奨。")
+    if host == "0.0.0.0":
+        print("※ ネットワーク全体に公開中。HTTPのBasic認証は平文です。社外秘なら"
+              " TLS(リバースプロキシ)か CASE_FINDER_HOST=127.0.0.1＋SSHトンネルを推奨。")
     jobs.warmup()  # 埋め込みモデルを先読みして初回検索を速く
-    print(f"\n事例ファインダーを起動します → http://0.0.0.0:{port}")
-    print("同じネットワークの人は http://<このPCのIP>:%d で使えます。\n" % port)
+    print(f"\n事例ファインダーを起動します → http://{host}:{port}")
+    if host == "0.0.0.0":
+        print("同じネットワークの人は http://<このPCのIP>:%d で使えます。\n" % port)
     try:
         from waitress import serve  # 本番向けの安定サーバー
 
-        serve(app, host="0.0.0.0", port=port, threads=int(os.environ.get("THREADS", "8")))
+        serve(app, host=host, port=port, threads=int(os.environ.get("THREADS", "8")))
     except ImportError:
         print("（waitress未導入のため開発サーバーで起動。常用は pip install waitress を推奨）")
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

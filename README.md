@@ -82,7 +82,27 @@ CASE_FINDER_WRITE_PASSWORD=ひみつ python app.py      # 読みは自由・取�
 ```
 - どちらも未設定だと**認証なしで公開**されます（同一LAN内の誰でも閲覧・取り込み可）。社外秘では設定を推奨。
 - `waitress` が入っていれば自動で本番サーバー、無ければ警告付きで開発サーバーになります。
-- 起動時に埋め込みモデルを先読み（warmup）するため、最初の検索の待ちが減ります。
+- 起動時に埋め込みモデル＋リランカーを先読み（warmup）するため、最初の検索の待ちが減ります。
+
+### 安全な公開（TLS）
+Basic認証はHTTPでは**平文**です。社外秘を扱うなら次のいずれかを推奨:
+- **リバースプロキシでTLS**（例 Caddy 1行）: `case.example.lan { reverse_proxy 127.0.0.1:5000 }`
+  （アプリは `CASE_FINDER_HOST=127.0.0.1` でローカル限定にする）
+- **SSHトンネル**: `ssh -L 5000:127.0.0.1:5000 サーバ` 経由で各自アクセス
+
+### 監視・自動再起動
+- ヘルスチェック（**認証不要**）: `GET /healthz` → `{"status":"ok","cases":N}`
+- 稼働指標: `GET /api/metrics`（検索数・レイテンシ・キャッシュヒット率・Azureトークン等）
+- systemd で常駐＋自動再起動: `deploy/case-finder.service` を参照
+  （`Restart=always`、外形監視は `/healthz` を叩く）
+
+### GPU で高速化
+GPUがあれば自動利用されます（`CASE_FINDER_DEVICE=auto` 既定。`cpu`/`cuda`/`mps` を明示も可）。
+埋め込み・リランカー・OCR が数倍速くなります（要 CUDA 版 torch）。
+
+### バックアップ
+状態は `cases.db` のみ（埋め込みは `data/` から再生成可、👍/👎は再生成不可）。
+`cases.db` と `data/` を定期バックアップしてください（WAL有効のため `cases.db-wal/-shm` も含めるか、停止中にコピー）。
 
 ## しきい値の校正（任意・精度の作り込み）
 `MIN_SCORE` などの既定値は汎用の目安です。あなたの事例に合わせるには:
@@ -112,7 +132,9 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_INDUSTRIES` | （内蔵リスト） | 業種候補をカンマ区切りで上書き |
 | `CASE_FINDER_PASSWORD` | （なし） | 全体のBasic認証パスワード |
 | `CASE_FINDER_WRITE_PASSWORD` | （なし） | 取り込みのみ要認証にする場合 |
-| `PORT` | `5000` | 待ち受けポート |
+| `CASE_FINDER_DEVICE` | `auto` | `auto`/`cpu`/`cuda`/`mps`（GPU利用） |
+| `CASE_FINDER_HOST` / `PORT` | `0.0.0.0` / `5000` | 待ち受けアドレス/ポート |
+| `CASE_FINDER_DB_TIMEOUT` | `5000` | SQLiteロック待ち(ms) |
 
 ## Azure 生成AI（任意の選択機能）
 有効にすると、検索の上に生成AIの能力を上乗せできます。**未設定なら一切使われず、
@@ -201,8 +223,9 @@ CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
 | `calibrate.py` | 評価データから閾値を校正するツール |
 | `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |
 | `app.py` | Flask サーバー（API + 画面配信 + 認証 + メトリクス/ログ） |
-| `cache.py` / `metrics.py` | TTLキャッシュ / 稼働メトリクス |
+| `cache.py` / `metrics.py` / `device.py` | TTLキャッシュ / 稼働メトリクス / GPU解決 |
 | `setup.sh` / `run.sh` | 導入（venv作成＋依存）・起動スクリプト |
+| `deploy/case-finder.service` | systemd ユニット例（常駐・自動再起動） |
 | `templates/index.html` | 画面（意味検索＋関係グラフ＋根拠ハイライト＋アップロード） |
 | `tests/` | スタブ埋め込みによるスモークテスト（12件） |
 | `data/` | 事例の PPT/PDF を置く場所 |

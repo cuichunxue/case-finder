@@ -439,6 +439,41 @@ def test_answer_stream_stub(env, monkeypatch):
     assert '"type": "done"' in text
 
 
+# ── SQLite: WAL とロック待ちが有効 ──
+def test_sqlite_wal_enabled(env):
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 1000
+    conn.close()
+
+
+# ── /healthz は認証不要で疎通する ──
+def test_healthz_public(env, monkeypatch):
+    import app
+
+    monkeypatch.setattr(app, "AUTH_PASSWORD", "secret")  # 全体認証ありでも
+    c = app.app.test_client()
+    r = c.get("/healthz")
+    assert r.status_code == 200
+    assert r.get_json()["status"] == "ok"
+
+
+# ── デバイス解決：明示cpu/autoともに妥当な値 ──
+def test_device_resolve(monkeypatch):
+    import device
+
+    monkeypatch.setenv("CASE_FINDER_DEVICE", "cpu")
+    device.resolve.cache_clear()
+    assert device.resolve() == "cpu"
+    assert device.use_gpu() is False
+    monkeypatch.setenv("CASE_FINDER_DEVICE", "auto")
+    device.resolve.cache_clear()
+    assert device.resolve() in ("cpu", "cuda", "mps")
+    device.resolve.cache_clear()
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

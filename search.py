@@ -23,8 +23,12 @@ import numpy as np
 
 import azure_ai
 import cache
+import device
 import metrics
 import rerank
+
+# SQLite のロック待ち時間（ミリ秒）。取り込みと書き込みの競合を吸収する。
+DB_TIMEOUT_MS = int(os.environ.get("CASE_FINDER_DB_TIMEOUT", "5000"))
 
 # 埋め込みバックエンド: local（既定・完全ローカル）/ azure（Azure OpenAI 埋め込み）
 EMBED_BACKEND = os.environ.get("CASE_FINDER_EMBED_BACKEND", "local").lower()
@@ -78,7 +82,7 @@ RERANK_TOP = int(os.environ.get("CASE_FINDER_RERANK_TOP", "50"))
 def _model():
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(MODEL_NAME)
+    return SentenceTransformer(MODEL_NAME, device=device.resolve())
 
 
 def embed(texts, kind: str):
@@ -159,8 +163,12 @@ def matched_spans(query: str, text: str, limit: int = 8):
 # SQLite
 # ──────────────────────────────────────────────────────────────
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
+    # 同時書き込みでの "database is locked" を抑える設定
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={DB_TIMEOUT_MS}")
     return conn
 
 
@@ -559,5 +567,6 @@ def stats():
         "hybrid": ix["bm25"] is not None,
         "reranker": rerank.available(),
         "ann": ix.get("ann") is not None,
+        "device": device.resolve(),
         "azure": az,
     }
