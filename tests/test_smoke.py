@@ -196,6 +196,64 @@ def test_auth_full_and_write_only(env, monkeypatch):
 
 
 # ── API: 非同期アップロード → ジョブ完了 ──
+# ── Azure: 未設定なら無効＋/api/answer はフォールバック ──
+def test_azure_disabled_by_default(env):
+    import azure_ai
+
+    assert azure_ai.available() is False
+    assert search_stats_azure_off(env)
+
+
+def search_stats_azure_off(env):
+    az = env.search.stats()["azure"]
+    return az["synth"] is False and az["embed"] is False
+
+
+def test_api_answer_fallback(env, monkeypatch):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    c = app.app.test_client()
+    j = c.get("/api/answer?q=hello").get_json()
+    assert j["answer"] is None        # Azure未設定 → 生成なし
+    assert j["nodes"][0]["title"] == "A"  # 検索結果は通常どおり返る
+
+
+# ── Azure: スタブ要約が /api/answer から返る ──
+def test_api_answer_with_stub(env, monkeypatch):
+    import app
+    import azure_ai
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0, text="属人化を解消した")
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    monkeypatch.setattr(azure_ai, "available", lambda: True)
+    monkeypatch.setattr(azure_ai, "synthesize",
+                        lambda q, cases: {"answer": "メンター制度が有効です [1]",
+                                          "citations": [{"n": 1, "title": cases[0]["title"],
+                                                         "source": cases[0]["source"], "industry": ""}],
+                                          "model": "gpt-stub"})
+    c = app.app.test_client()
+    j = c.get("/api/answer?q=属人化").get_json()
+    assert j["answer"] == "メンター制度が有効です [1]"
+    assert j["citations"][0]["title"] == "A"
+    assert j["model"] == "gpt-stub"
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

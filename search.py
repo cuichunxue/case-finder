@@ -21,7 +21,11 @@ from functools import lru_cache
 
 import numpy as np
 
+import azure_ai
 import rerank
+
+# 埋め込みバックエンド: local（既定・完全ローカル）/ azure（Azure OpenAI 埋め込み）
+EMBED_BACKEND = os.environ.get("CASE_FINDER_EMBED_BACKEND", "local").lower()
 
 # ──────────────────────────────────────────────────────────────
 # 設定
@@ -62,6 +66,9 @@ def _model():
 
 def embed(texts, kind: str):
     assert kind in ("query", "passage")
+    # 任意: Azure 埋め込みバックエンド（取り込み・検索で同一バックエンドにすること）
+    if EMBED_BACKEND == "azure" and azure_ai.embeddings_available():
+        return azure_ai.embed(texts)
     prefixed = [f"{kind}: {t}" for t in texts]
     vecs = _model().encode(prefixed, normalize_embeddings=True, convert_to_numpy=True)
     return vecs.astype(np.float32)
@@ -310,7 +317,14 @@ def _rank_cases(ix, query):
     if not C or chunk_emb.size == 0:
         return []
 
-    qv = embed([query], "query")[0]
+    # 任意: Azure クエリ拡張(HyDE)。密検索のみに反映し、BM25 は原クエリのまま。
+    dense_query = query
+    if azure_ai.expand_enabled():
+        extra = azure_ai.expand_query(query)
+        if extra:
+            dense_query = query + "\n" + extra
+
+    qv = embed([dense_query], "query")[0]
     chunk_cos = chunk_emb @ qv  # (M,)
 
     case_cos = np.full(C, -1.0)
@@ -436,10 +450,12 @@ def list_industries():
 
 def stats():
     ix = get_index()
+    az = azure_ai.status()
     return {
         "count": len(ix["meta"]),
-        "model": MODEL_NAME,
+        "model": ("azure:" + os.environ.get("AZURE_OPENAI_EMBED_DEPLOYMENT", "")) if az["embed"] else MODEL_NAME,
         "industries": sorted({m["industry"] for m in ix["meta"] if m["industry"]}),
         "hybrid": ix["bm25"] is not None,
         "reranker": rerank.available(),
+        "azure": az,
     }

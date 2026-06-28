@@ -9,6 +9,10 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 3段構成で、LLM-RAG 同等以上の精度を狙います（いずれも非生成・BERT系/語彙）。
 精度は `bench.py`（Recall@k / MRR / nDCG）で測定できます。
 
+さらに **Azure 生成AI（任意）** を有効にすると、検索上位を根拠にした
+**要約・示唆（出典つき）**、クエリ拡張、Azure 埋め込みを上乗せできます。
+未設定なら自動的に純ローカルへフォールバックします。
+
 ## できること
 - `data/` に置いた PPT / PDF を読み取り、意味ベクトル化して登録
 - **画面からアップロード**しても取り込める（CLI不要・その場で検索対象に）
@@ -19,6 +23,7 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 - 事例同士のつながりをグラフで可視化／結果から元ファイルを開ける
 - ローカルサーバーなので、同じネットワークの人みんなで使える
 - 任意の **Basic認証**と**本番サーバー（waitress）**に対応
+- 任意で **Azure 生成AI** を選択し、検索上位を根拠にした**要約・示唆（出典つき）**を生成
 
 ## セットアップ
 ```bash
@@ -96,10 +101,36 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_WRITE_PASSWORD` | （なし） | 取り込みのみ要認証にする場合 |
 | `PORT` | `5000` | 待ち受けポート |
 
+## Azure 生成AI（任意の選択機能）
+有効にすると、検索の上に生成AIの能力を上乗せできます。**未設定なら一切使われず、
+完全ローカルのまま動作します。**
+
+- **RAG要約**：検索上位の事例だけを根拠に、課題への示唆を日本語で生成（出典 [n] つき）
+- **クエリ拡張(HyDE)**（任意）：仮想事例を生成して密検索の再現率を底上げ
+- **Azure 埋め込み**（任意）：ローカル埋め込みの代わりに使用（取り込みと検索で揃える）
+
+> ⚠ **プライバシー注意**：有効化すると、クエリや上位事例の本文が Azure に送信されます。
+> 社外秘データを扱う場合は、契約・データ保持ポリシーを確認のうえご利用ください。
+
+```bash
+pip install openai
+export CASE_FINDER_AZURE=on
+export AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+export AZURE_OPENAI_API_KEY=<key>
+export AZURE_OPENAI_CHAT_DEPLOYMENT=<chatデプロイ名>       # 要約・拡張
+export AZURE_OPENAI_EMBED_DEPLOYMENT=<embeddingデプロイ名> # 任意
+# 任意: クエリ拡張 / 埋め込みをAzureに
+export CASE_FINDER_AZURE_EXPAND=on
+export CASE_FINDER_EMBED_BACKEND=azure   # 使う場合は取り込みも同設定で再 ingest
+python app.py
+```
+画面では、Azureが有効なときだけ「🧠 AIで要約（Azure）」トグルが現れます。
+API は `GET /api/answer?q=...`（`{answer, citations, nodes}` を返す。Azure無効時は `answer:null`）。
+
 ## テスト
 ```bash
 pip install pytest
-pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR不要）
+pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR/Azure不要）
 ```
 
 ## 仕組み（生成AI不使用）
@@ -144,6 +175,7 @@ CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
 | `extract.py` | BERT埋め込みで「課題/施策/成果」分類・業種推定 |
 | `search.py` | チャンク密検索＋BM25ハイブリッド＋リランク・抜粋根拠の中核 |
 | `rerank.py` | クロスエンコーダ・リランカー（未導入なら自動フォールバック） |
+| `azure_ai.py` | Azure OpenAI連携（任意）：RAG要約・クエリ拡張・Azure埋め込み |
 | `jobs.py` | 取り込みのバックグラウンド実行＋進捗＋モデルwarmup |
 | `calibrate.py` | 評価データから閾値を校正するツール |
 | `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |

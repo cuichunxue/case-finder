@@ -22,6 +22,7 @@ from flask import (
     send_from_directory,
 )
 
+import azure_ai
 import ingest
 import jobs
 import ocr
@@ -91,6 +92,31 @@ def api_search():
 @app.route("/api/stats")
 def api_stats():
     return jsonify(search.stats())
+
+
+@app.route("/api/answer")
+def api_answer():
+    """検索上位を根拠に Azure 生成AIで要約・示唆を返す（任意機能）。
+
+    Azure 未設定なら answer=null を返し、フロントは通常の検索結果のみ表示する。
+    """
+    q = request.args.get("q", "").strip()
+    industry = request.args.get("industry", "").strip()
+    top_k = int(request.args.get("k", 5))
+    result = search.search(q, top_k=top_k, industry=industry)
+    nodes = result["nodes"]
+    if not azure_ai.available():
+        return jsonify({"answer": None, "reason": "Azure未設定", "nodes": nodes})
+    if not nodes:
+        return jsonify({"answer": None, "reason": "該当事例なし", "nodes": nodes})
+    try:
+        out = azure_ai.synthesize(q, nodes)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"answer": None, "reason": f"生成に失敗: {e}", "nodes": nodes})
+    return jsonify({
+        "answer": out["answer"], "citations": out["citations"],
+        "model": out.get("model"), "nodes": nodes,
+    })
 
 
 @app.route("/api/upload", methods=["POST"])

@@ -14,3 +14,5 @@ Pillow>=10.0
 #   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
 #   pip   : pip install pytesseract
 # 開発・テスト用（任意）: pip install pytest
+# Azure 生成AI（任意の選択機能）。有効化する場合のみ: pip install openai
+# openai>=1.30
