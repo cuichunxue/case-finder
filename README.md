@@ -25,6 +25,7 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 - 任意の **Basic認証**と**本番サーバー（waitress）**に対応
 - 任意で **Azure 生成AI** を選択し、検索上位を根拠にした**要約・示唆（出典つき・逐次表示）**を生成
 - 結果への 👍/👎 フィードバック記録、稼働メトリクス（`/api/metrics`）
+- **トピック地図**：事例全体を自動でクラスタリングし、キーワード＋2Dマップで俯瞰（「🗺 マップ」）
 
 ## セットアップ（ローカル / venv）
 ```bash
@@ -210,11 +211,22 @@ CASE_FINDER_MODEL=cl-nagoya/ruri-large python app.py
 切替に関わる環境変数: `CASE_FINDER_MODEL` / `CASE_FINDER_RERANK`(auto|off) /
 `CASE_FINDER_RERANKER` / `CASE_FINDER_HYBRID`(auto|off) / `CASE_FINDER_CHUNK_SIZE`。
 
-### 精度の測定（A/B）
+### 精度の測定（A/B・信頼区間つき）
+`eval.json` は二値（`"relevant": ["断片", ...]`）と段階的（`"relevant": {"断片": 2}`）の両対応。
 ```bash
-python bench.py                          # 現設定の Recall@k / MRR / nDCG
+python bench.py                          # Recall@k / MRR / nDCG＋95%CI
 CASE_FINDER_HYBRID=off python bench.py   # 密のみと比較
 CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
+```
+評価中は HyDE を自動オフ。実務では 50〜100 クエリの評価セットを推奨（CIが締まる）。
+
+### トピック地図（テキストマインドマップ）
+画面の「🗺 マップ」で、登録事例を**自動クラスタリング**し、各トピックの**特徴語(c-TF-IDF)**と
+**2D配置(PCA)**・つながり(kNN)で俯瞰できます（API: `GET /api/map`）。依存追加なし。
+日本語の特徴語をより読みやすくするには形態素解析の併用が有効:
+```bash
+pip install sudachipy sudachidict_core
+CASE_FINDER_TOKENIZER=sudachi python ingest.py   # 取り込みと検索で揃える
 ```
 
 ## 構成
@@ -231,6 +243,8 @@ CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
 | `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |
 | `app.py` | Flask サーバー（API + 画面配信 + 認証 + メトリクス/ログ） |
 | `cache.py` / `metrics.py` / `device.py` | TTLキャッシュ / 稼働メトリクス / GPU解決 |
+| `topics.py` | トピック地図（k-meansクラスタ＋c-TF-IDFキーワード＋PCA配置） |
+| `bench.py` / `calibrate.py` | 評価（段階的関連度・nDCG・信頼区間）/ 閾値校正 |
 | `setup.sh` / `run.sh` | 導入（venv作成＋依存）・起動スクリプト |
 | `deploy/case-finder.service` | systemd ユニット例（常駐・自動再起動） |
 | `templates/index.html` | 画面（意味検索＋関係グラフ＋根拠ハイライト＋アップロード） |

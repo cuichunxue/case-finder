@@ -474,6 +474,92 @@ def test_device_resolve(monkeypatch):
     device.resolve.cache_clear()
 
 
+# ── トピック地図：全事例がクラスタ・座標を持ち、キーワードが出る ──
+def test_topic_map(env):
+    import topics
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    # 2グループ（離職系 / EC系）を別方向のベクトルで作る
+    import math
+
+    import numpy as np
+    grpA = [("若手の離職を抑制", "a1.txt", "若手の離職と定着の課題"),
+            ("離職率の改善", "a2.txt", "離職を防ぐ定着施策")]
+    grpB = [("ECの離脱を改善", "b1.txt", "ECサイトの離脱とUI改善"),
+            ("カート離脱対策", "b2.txt", "離脱率をUIで改善")]
+    for i, (t, src, text) in enumerate(grpA):
+        v = np.array([1.0, 0.0], dtype=np.float32)
+        s.store_case(conn, t, src, text, "e", "", {}, [(text, v)])
+    for t, src, text in grpB:
+        v = np.array([0.0, 1.0], dtype=np.float32)
+        s.store_case(conn, t, src, text, "e", "", {}, [(text, v)])
+    conn.close()
+    s.invalidate_cache()
+
+    m = topics.build_map(s.get_index(), k=2)
+    assert len(m["cases"]) == 4
+    assert all("cluster" in c and "x" in c and "y" in c for c in m["cases"])
+    assert len(m["clusters"]) == 2
+    # 同方向ベクトルの2件は同じクラスタに入る
+    cl = {c["title"]: c["cluster"] for c in m["cases"]}
+    assert cl["若手の離職を抑制"] == cl["離職率の改善"]
+    assert cl["ECの離脱を改善"] == cl["カート離脱対策"]
+    assert any(cl_["keywords"] for cl_ in m["clusters"])  # キーワードが付く
+
+
+# ── /api/map エンドポイント ──
+def test_api_map(env):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    import numpy as np
+    s.store_case(conn, "A", "a.txt", "離職の課題", "e", "", {}, [("離職の課題", np.array([1.0, 0.0], dtype=np.float32))])
+    conn.close()
+    s.invalidate_cache()
+    j = app.app.test_client().get("/api/map").get_json()
+    assert "clusters" in j and "cases" in j and len(j["cases"]) == 1
+
+
+# ── 評価指標（純関数）──
+def test_eval_metrics():
+    import bench
+
+    # 1位が正解(grade2)、3位に正解(grade1)
+    grades = [2, 0, 1, 0, 0]
+    rel = [2, 1]
+    qm = bench.query_metrics(grades, rel)
+    assert qm["hit"] == 1.0
+    assert qm["mrr"] == 1.0
+    assert qm["recall@1"] == 0.5 and qm["recall@3"] == 1.0
+    assert 0.9 < qm["ndcg@5"] <= 1.0  # 理想に近い
+    mean, lo, hi = bench.bootstrap_ci([1.0, 1.0, 0.0, 1.0])
+    assert lo <= mean <= hi
+
+
+# ── チャンクのオーバーラップ ──
+def test_chunk_overlap(env):
+    import ingest
+
+    text = "\n".join(f"段落{i}の内容です。" * 8 for i in range(4))
+    chunks = ingest.chunk_text(text, size=80, overlap=20)
+    assert len(chunks) >= 2
+    # 2つ目以降の先頭に直前チャンク末尾が含まれる
+    tail = chunks[0][-20:]
+    assert tail[:6] in chunks[1]
+
+
+# ── トークナイザ：既定(char)はbigram ──
+def test_tokenizer_char(env, monkeypatch):
+    s = env.search
+    monkeypatch.setattr(s, "TOKENIZER", "char")
+    toks = s.tokenize("離職対策ABC")
+    assert "離職" in toks and "abc" in toks
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

@@ -129,11 +129,28 @@ def candidate_relevance(c: dict) -> float:
 # トークナイザ（BM25・ハイライト共用。MeCab不要の日本語対応）
 # ──────────────────────────────────────────────────────────────
 _CJK = r"぀-ヿ一-鿿ｦ-ﾟ"
+# トークナイザ: char（既定・依存なし）/ sudachi（要 sudachipy）/ auto
+TOKENIZER = os.environ.get("CASE_FINDER_TOKENIZER", "char").lower()
+_sudachi = {"obj": None, "failed": False}
 
 
-def tokenize(text: str):
-    """英数語＋日本語の文字bigramに分割（語彙一致用）。"""
-    text = text.lower()
+def _sudachi_tokens(text: str):
+    if _sudachi["failed"]:
+        return None
+    try:
+        if _sudachi["obj"] is None:
+            from sudachipy import dictionary, tokenizer as _tk
+
+            _sudachi["obj"] = (dictionary.Dictionary().create(), _tk.Tokenizer.SplitMode.C)
+        tok, mode = _sudachi["obj"]
+        return [m.normalized_form() for m in tok.tokenize(text, mode)
+                if m.surface().strip()]
+    except Exception:  # noqa: BLE001
+        _sudachi["failed"] = True
+        return None
+
+
+def _char_tokens(text: str):
     toks = re.findall(r"[a-z0-9][a-z0-9\-\.]*", text)
     for run in re.findall(f"[{_CJK}]+", text):
         if len(run) == 1:
@@ -141,6 +158,22 @@ def tokenize(text: str):
         else:
             toks += [run[i:i + 2] for i in range(len(run) - 1)]
     return toks
+
+
+def tokenize(text: str):
+    """語彙一致用トークン。既定は文字bigram（依存なし）。
+
+    形態素解析(Sudachi)を使うと語境界が正確になり、BM25のIDFが安定する。
+    CASE_FINDER_TOKENIZER=sudachi|auto かつ sudachipy 導入時に有効。
+    """
+    text = text.lower()
+    if TOKENIZER in ("sudachi", "auto"):
+        m = _sudachi_tokens(text)
+        if m is not None:
+            return m
+        if TOKENIZER == "sudachi":  # 明示指定で未導入なら char にフォールバック
+            pass
+    return _char_tokens(text)
 
 
 def matched_spans(query: str, text: str, limit: int = 8):

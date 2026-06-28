@@ -33,6 +33,7 @@ import jobs
 import metrics
 import ocr
 import search
+import topics
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -166,6 +167,17 @@ def api_search():
 @app.route("/api/stats")
 def api_stats():
     return jsonify(search.stats())
+
+
+@app.route("/api/map")
+def api_map():
+    """事例コーパスのトピック地図（クラスタ＋キーワード＋2D配置＋エッジ）。"""
+    k = request.args.get("k")
+    try:
+        ix = search.get_index()
+        return jsonify(topics.build_map(ix, k=int(k) if k else None))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/metrics")

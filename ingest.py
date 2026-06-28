@@ -21,8 +21,9 @@ from search import DATA_DIR, connect, embed, init_db, store_case
 
 SUPPORTED = (".pdf", ".pptx", ".ppt", ".txt", ".md")
 
-# チャンク分割の目安（文字数）
+# チャンク分割の目安（文字数）とオーバーラップ（境界での分断を緩和）
 CHUNK_SIZE = int(os.environ.get("CASE_FINDER_CHUNK_SIZE", "400"))
+CHUNK_OVERLAP = int(os.environ.get("CASE_FINDER_CHUNK_OVERLAP", "60"))
 
 # テキスト層がこの文字数未満のページ/スライドは画像中心とみなし OCR にかける
 OCR_TRIGGER_CHARS = 12
@@ -88,8 +89,12 @@ def make_excerpt(text: str, limit: int = 240) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
-def chunk_text(text: str, size: int = CHUNK_SIZE):
-    """本文を節単位のチャンクに分割する（行/段落でまとめ、長すぎる塊は強制分割）。"""
+def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
+    """本文を節単位のチャンクに分割する（行/段落でまとめ、長すぎる塊は強制分割）。
+
+    overlap>0 のとき、各チャンク先頭に直前チャンク末尾を少し重ねて、
+    文が境界で分断されることによる取りこぼしを緩和する。
+    """
     paras = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
     chunks, cur = [], ""
     for p in paras:
@@ -107,7 +112,15 @@ def chunk_text(text: str, size: int = CHUNK_SIZE):
             cur = p
     if cur:
         chunks.append(cur)
-    return chunks or [text[:size]]
+    chunks = chunks or [text[:size]]
+
+    if overlap > 0 and len(chunks) > 1:
+        out = [chunks[0]]
+        for i in range(1, len(chunks)):
+            tail = chunks[i - 1][-overlap:]
+            out.append((tail + "\n" + chunks[i]).strip())
+        chunks = out
+    return chunks
 
 
 def ingest_file(conn, path: str, ocr_ok: bool, industry: str | None = None) -> bool:
