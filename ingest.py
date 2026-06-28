@@ -13,7 +13,8 @@ import os
 import sys
 
 import ocr
-from extract import extract_fields
+import search
+from extract import classify_industry, extract_fields
 from search import DATA_DIR, connect, embed, init_db, upsert_case
 
 SUPPORTED = (".pdf", ".pptx", ".ppt", ".txt", ".md")
@@ -82,7 +83,7 @@ def make_excerpt(text: str, limit: int = 240) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
-def ingest_file(conn, path: str, ocr_ok: bool) -> bool:
+def ingest_file(conn, path: str, ocr_ok: bool, industry: str | None = None) -> bool:
     title = os.path.splitext(os.path.basename(path))[0]
     source = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -95,13 +96,14 @@ def ingest_file(conn, path: str, ocr_ok: bool) -> bool:
         print(f"  ⚠ {source}: テキストを抽出できませんでした{hint}")
         return False
 
-    # BERT埋め込みで「課題/施策/成果」に分類
+    # BERT埋め込みで「課題/施策/成果」に分類、業種を推定（指定があれば優先）
     fields = extract_fields(text)
+    ind = industry if industry is not None else classify_industry(text)
     # タイトルを先頭に足して意味の手掛かりを強める
     vec = embed([f"{title}\n{text}"], "passage")[0]
-    upsert_case(conn, title, source, text, make_excerpt(text), fields, vec)
+    upsert_case(conn, title, source, text, make_excerpt(text), ind, fields, vec)
     got = [name for name, key in (("課題", "problem"), ("施策", "action"), ("成果", "result")) if fields.get(key)]
-    print(f"  ✓ {source}  ({len(text)} 文字 / 抽出: {('・'.join(got)) or 'なし'})")
+    print(f"  ✓ {source}  ({len(text)} 文字 / 業種: {ind or '不明'} / 抽出: {('・'.join(got)) or 'なし'})")
     return True
 
 
@@ -133,7 +135,20 @@ def main(argv):
     for path in targets:
         if ingest_file(conn, path, ocr_ok):
             ok += 1
+
+    # 引数なし（data/全体の取り込み）時は、消えたファイルのDB行を掃除する
+    if not argv:
+        on_disk = {
+            os.path.relpath(p, os.path.dirname(os.path.abspath(__file__)))
+            for p in iter_targets([])
+        }
+        stale = search.all_sources(conn) - on_disk
+        if stale:
+            search.delete_sources(conn, stale)
+            print(f"  ・削除済みファイルのレコードを {len(stale)} 件掃除しました")
+
     conn.close()
+    search.invalidate_cache()
     print(f"\n完了: {ok}/{len(targets)} 件を登録しました。`python app.py` で起動できます。")
 
 

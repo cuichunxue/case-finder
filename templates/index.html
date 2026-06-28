@@ -20,17 +20,28 @@
   h1{font-size:26px; font-weight:700; margin:0; letter-spacing:-0.01em;}
   .tag-accent{color:var(--accent); font-size:13px; font-weight:600;}
   .lead{color:var(--sub); font-size:14px; margin:0 0 22px;}
-  .searchbar{display:flex; gap:10px; margin-bottom:8px;}
-  input{
-    flex:1; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  .searchbar{display:flex; gap:10px; margin-bottom:8px; flex-wrap:wrap;}
+  input[type=text], input#q{
+    flex:1; min-width:220px; background:var(--panel); border:1px solid var(--line); border-radius:10px;
     padding:13px 15px; color:var(--ink); font-size:15px; outline:none;
   }
   input::placeholder{color:var(--sub);}
+  select{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:0 12px; color:var(--ink); font-size:14px; outline:none; cursor:pointer;
+  }
   button.go{
     background:var(--accent); color:#06231F; border:none; border-radius:10px;
     padding:0 22px; font-weight:700; font-size:15px; cursor:pointer;
   }
-  .meta{color:var(--sub); font-size:12px; margin:6px 2px 22px;}
+  .meta{color:var(--sub); font-size:12px; margin:6px 2px 8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  .linkbtn{background:none; border:none; color:var(--accent); cursor:pointer; font-size:12px; padding:0;}
+  .uploader{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px; margin:0 0 22px; display:none; gap:10px; flex-wrap:wrap; align-items:center;}
+  .uploader.open{display:flex;}
+  .uploader .hint{color:var(--sub); font-size:11.5px; flex-basis:100%;}
+  .uploader input[type=file]{color:var(--sub); font-size:13px;}
+  .upstatus{color:var(--sub); font-size:12px; flex-basis:100%;}
   .layout{display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:20px;}
   @media (max-width:760px){ .layout{grid-template-columns:1fr;} }
   .card{background:var(--panel); border:1px solid var(--line); border-radius:14px;}
@@ -72,9 +83,21 @@
 
   <div class="searchbar">
     <input id="q" placeholder="例：問い合わせ対応がベテラン頼みでばらつく" />
+    <select id="industry"><option value="">業種：すべて</option></select>
     <button class="go" id="go">探す</button>
   </div>
-  <div class="meta" id="meta"></div>
+  <div class="meta">
+    <span id="metatext"></span>
+    <button class="linkbtn" id="toggleUpload">＋ 事例を追加</button>
+  </div>
+
+  <div class="uploader" id="uploader">
+    <input type="file" id="files" multiple accept=".pdf,.pptx,.ppt,.txt,.md" />
+    <select id="upIndustry"><option value="">業種：自動推定</option></select>
+    <button class="go" id="uploadBtn">取り込む</button>
+    <div class="hint">PPT / PDF を選んで取り込むと、その場で意味検索の対象になります（初回はOCR/モデルのDLで時間がかかる場合があります）。</div>
+    <div class="upstatus" id="upstatus"></div>
+  </div>
 
   <div id="result"></div>
 </div>
@@ -84,27 +107,63 @@ const PALETTE = {accent:"#4DD6C1", accent2:"#F2B441", node:"#3A4757", sub:"#8B96
 const $ = (s) => document.querySelector(s);
 let lastData = null;
 
+function fillIndustries(list){
+  const cur = $("#industry").value;
+  $("#industry").innerHTML = `<option value="">業種：すべて</option>` +
+    list.map(i => `<option value="${esc(i)}">${esc(i)}</option>`).join("");
+  $("#industry").value = cur;
+  $("#upIndustry").innerHTML = `<option value="">業種：自動推定</option>` +
+    list.map(i => `<option value="${esc(i)}">${esc(i)}</option>`).join("");
+}
+
 async function loadStats(){
   try{
     const s = await (await fetch("/api/stats")).json();
-    $("#meta").textContent = `登録事例 ${s.count} 件 ・ モデル: ${s.model}`;
+    $("#metatext").textContent = `登録事例 ${s.count} 件 ・ モデル: ${s.model}`;
+    fillIndustries(s.industries || []);
   }catch(e){ /* noop */ }
 }
 
 async function run(){
   const q = $("#q").value.trim();
   if(!q) return;
+  const industry = $("#industry").value;
   $("#result").innerHTML = `<div class="empty">検索中…</div>`;
   try{
-    const data = await (await fetch("/api/search?q=" + encodeURIComponent(q))).json();
+    const url = "/api/search?q=" + encodeURIComponent(q) + "&industry=" + encodeURIComponent(industry);
+    const data = await (await fetch(url)).json();
     lastData = data;
     render(data, null);
   }catch(e){
-    $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}</div>`;
+    $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}（モデルの初回DL中・未準備の可能性）</div>`;
   }
 }
 
-function matchBadge(score){ return `<span class="match">合致 ${Math.round(score*100)}%</span>`; }
+async function upload(){
+  const input = $("#files");
+  if(!input.files.length){ $("#upstatus").textContent = "ファイルを選んでください。"; return; }
+  const fd = new FormData();
+  for(const f of input.files) fd.append("files", f);
+  fd.append("industry", $("#upIndustry").value);
+  $("#upstatus").textContent = "取り込み中…（OCR/分類のため少し時間がかかります）";
+  try{
+    const r = await (await fetch("/api/upload", {method:"POST", body:fd})).json();
+    if(r.error){ $("#upstatus").textContent = "エラー：" + r.error; return; }
+    const msg = [`追加 ${r.added.length} 件`];
+    if(r.rejected && r.rejected.length) msg.push(`未対応 ${r.rejected.length} 件`);
+    $("#upstatus").textContent = msg.join(" / ") + `（登録合計 ${r.count} 件）`;
+    input.value = "";
+    fillIndustries(r.industries || []);
+    $("#metatext").textContent = `登録事例 ${r.count} 件`;
+  }catch(e){
+    $("#upstatus").textContent = "アップロードに失敗しました：" + e;
+  }
+}
+
+function matchBadge(node){
+  const pct = Math.round((node.relevance != null ? node.relevance : node.score) * 100);
+  return `<span class="match">関連度 ${pct}%</span>`;
+}
 
 function fieldRow(label, val, color){
   if(!val) return "";
@@ -117,7 +176,7 @@ function fieldRow(label, val, color){
 function render(data, selectedId){
   const nodes = data.nodes || [];
   if(!nodes.length){
-    $("#result").innerHTML = `<div class="empty">近い事例が見つかりませんでした。言い回しを変えるか、<code>python ingest.py</code> で事例を登録してください。</div>`;
+    $("#result").innerHTML = `<div class="empty">関連の高い事例が見つかりませんでした。言い回しや業種を変えるか、「＋ 事例を追加」で事例を登録してください。</div>`;
     return;
   }
   const selected = selectedId ? nodes.find(n => n.id === selectedId) : null;
@@ -139,7 +198,7 @@ function renderList(nodes){
     <button class="item" data-id="${c.id}">
       <div class="item-top">
         <span class="item-title">${esc(c.title)}</span>
-        ${matchBadge(c.score)}
+        ${matchBadge(c)}
       </div>
       <div class="item-sub">${esc(c.problem || c.excerpt)}</div>
     </button>`).join("") + `</div>`;
@@ -159,8 +218,9 @@ function renderDetail(c, nodes){
     <div class="card detail">
       <button class="back" id="back">← 一覧へ戻る</button>
       <div style="display:flex; justify-content:space-between; align-items:start; gap:8px; margin-bottom:14px;">
-        <h3>${esc(c.title)}</h3>${matchBadge(c.score)}
+        <h3>${esc(c.title)}</h3>${matchBadge(c)}
       </div>
+      ${fieldRow("業種", c.industry)}
       ${fieldRow("課題", c.problem)}
       ${fieldRow("施策", c.action)}
       ${fieldRow("成果", c.result, "var(--accent)")}
@@ -186,9 +246,10 @@ function renderDetail(c, nodes){
 function drawGraph(data, selectedId){
   const W=520, H=420, cx=W/2, cy=H/2;
   const nodes = data.nodes.map((c,i) => {
+    const rel = (c.relevance != null ? c.relevance : c.score);  // 関連度で距離・大きさを決める
     const angle = (i / data.nodes.length) * Math.PI * 2 - Math.PI/2;
-    const dist = 70 + (1 - c.score) * 130;
-    return {...c, x: cx + Math.cos(angle)*dist, y: cy + Math.sin(angle)*dist, r: 13 + c.score*12};
+    const dist = 70 + (1 - rel) * 130;
+    return {...c, rel, x: cx + Math.cos(angle)*dist, y: cy + Math.sin(angle)*dist, r: 13 + rel*12};
   });
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">`;
@@ -202,7 +263,7 @@ function drawGraph(data, selectedId){
     const a = byId[e.a], b = byId[e.b];
     if(!a || !b) continue;
     svg += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"
-      stroke="${PALETTE.sub}" stroke-opacity="${(e.sim-0.5)*0.6}" stroke-width="${e.sim*1.5}" />`;
+      stroke="${PALETTE.sub}" stroke-opacity="${Math.min(0.5,(e.sim-0.75)*1.5)}" stroke-width="${e.sim*1.5}" />`;
   }
   // 中心ノード
   svg += `<circle cx="${cx}" cy="${cy}" r="26" fill="${PALETTE.center}" />
@@ -230,6 +291,9 @@ function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt
 
 $("#go").onclick = run;
 $("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(); });
+$("#industry").addEventListener("change", () => { if($("#q").value.trim()) run(); });
+$("#toggleUpload").onclick = () => $("#uploader").classList.toggle("open");
+$("#uploadBtn").onclick = upload;
 loadStats();
 </script>
 </body>

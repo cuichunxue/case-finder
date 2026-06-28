@@ -51,6 +51,20 @@ _HEAD_RE = {
 # e5 は正規化済みベクトル同士でも全体的に高めに出るため、しきい値は高め
 CLASSIFY_THRESHOLD = 0.80
 
+# 業種の候補（環境変数 CASE_FINDER_INDUSTRIES でカンマ区切り上書き可）
+import os as _os
+
+INDUSTRIES = [
+    s.strip()
+    for s in _os.environ.get(
+        "CASE_FINDER_INDUSTRIES",
+        "IT・SaaS,製造,小売・EC,サービス,金融,医療・ヘルスケア,建設・不動産,教育,物流,公共・自治体",
+    ).split(",")
+    if s.strip()
+]
+# 業種推定の最低類似度（これ未満は「業種なし」にして誤分類を避ける）
+INDUSTRY_THRESHOLD = float(_os.environ.get("CASE_FINDER_INDUSTRY_THRESHOLD", "0.80"))
+
 
 @lru_cache(maxsize=1)
 def _prototypes():
@@ -111,3 +125,23 @@ def extract_fields(text: str) -> dict:
                 out[cols[best[i]]].append(ln)
 
     return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+@lru_cache(maxsize=1)
+def _industry_protos():
+    # 業種名をそのままプロトタイプ文として埋め込む
+    return embed([f"これは{name}業界の事例です" for name in INDUSTRIES], "passage")
+
+
+def classify_industry(text: str) -> str:
+    """事例本文から業種をBERT埋め込みで推定する（生成AI不使用）。
+
+    最も近い業種を返す。どれにも十分近くなければ空文字（業種なし）。
+    """
+    if not INDUSTRIES or not text.strip():
+        return ""
+    head = " ".join(text.split())[:600]  # 冒頭中心に判定
+    v = embed([head], "passage")[0]
+    sims = _industry_protos() @ v
+    best = int(sims.argmax())
+    return INDUSTRIES[best] if sims[best] >= INDUSTRY_THRESHOLD else ""
