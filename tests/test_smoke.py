@@ -356,6 +356,89 @@ def test_answer_cache(env, monkeypatch):
     assert calls["n"] == 1  # 2回目はキャッシュ
 
 
+# ── 観測性: /api/metrics にカウンタとキャッシュ統計が出る ──
+def test_metrics_endpoint(env, monkeypatch):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    c = app.app.test_client()
+    c.get("/api/search?q=hello")
+    m = c.get("/api/metrics").get_json()
+    assert m["counters"].get("searches", 0) >= 1
+    assert "result" in m["cache"] and "answer" in m["cache"]
+
+
+# ── フィードバック: 👍がDBに記録される ──
+def test_feedback_recorded(env):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    conn.close()
+    c = app.app.test_client()
+    r = c.post("/api/feedback", data={"q": "離職", "case_id": "1", "vote": "up"})
+    assert r.get_json()["ok"] is True
+    conn = s.connect()
+    row = conn.execute("SELECT query, vote FROM feedback").fetchone()
+    conn.close()
+    assert row["query"] == "離職" and row["vote"] == "up"
+
+
+# ── ANN×業種: 業種フィルタ時は ANN を使わず総当たり ──
+def test_ann_bypassed_with_industry(env, monkeypatch):
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0, industry="製造")
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+
+    seen = {}
+    orig = s._rank_cases
+    monkeypatch.setattr(s, "_rank_cases",
+                        lambda ix, q, use_ann=True: seen.update(use_ann=use_ann) or orig(ix, q, use_ann))
+    s.search("q", industry="製造", min_rel=0.0)
+    assert seen["use_ann"] is False
+    s.search("q", min_rel=0.0)
+    assert seen["use_ann"] is True
+
+
+# ── ストリーミング要約: SSEで results→token→done が流れる ──
+def test_answer_stream_stub(env, monkeypatch):
+    import app
+    import azure_ai
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0, text="属人化を解消した")
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    monkeypatch.setattr(azure_ai, "available", lambda: True)
+    monkeypatch.setattr(azure_ai, "synthesize_stream",
+                        lambda q, cases: iter([("token", "あ"), ("token", "い"),
+                                               ("citations", [{"n": 1, "title": "A", "source": "a.txt", "industry": ""}]),
+                                               ("done", "stub")]))
+    c = app.app.test_client()
+    text = c.get("/api/answer_stream?q=属人化").get_data(as_text=True)
+    assert '"type": "results"' in text
+    assert "あ" in text and "い" in text
+    assert '"type": "done"' in text
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

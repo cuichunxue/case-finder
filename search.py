@@ -23,6 +23,7 @@ import numpy as np
 
 import azure_ai
 import cache
+import metrics
 import rerank
 
 # 埋め込みバックエンド: local（既定・完全ローカル）/ azure（Azure OpenAI 埋め込み）
@@ -42,8 +43,13 @@ _RESULT_CACHE = cache.TTLCache(CACHE_SIZE, CACHE_TTL)
 # 設定
 # ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "cases.db")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# DB と事例フォルダは環境変数で差し替え可能（Docker のボリューム永続化用）
+DB_PATH = os.environ.get("CASE_FINDER_DB", os.path.join(BASE_DIR, "cases.db"))
+DATA_DIR = os.environ.get("CASE_FINDER_DATA_DIR", os.path.join(BASE_DIR, "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 MODEL_NAME = os.environ.get("CASE_FINDER_MODEL", "intfloat/multilingual-e5-small")
 
@@ -186,7 +192,33 @@ def init_db(conn):
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_case ON chunks(case_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      REAL NOT NULL,
+            query   TEXT NOT NULL,
+            case_id INTEGER,
+            vote    TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
+
+
+def record_feedback(query: str, case_id, vote: str):
+    """検索結果への👍/👎を記録（将来の調整用。索引には影響しない）。"""
+    import time as _t
+
+    conn = connect()
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO feedback (ts, query, case_id, vote) VALUES (?, ?, ?, ?)",
+        (_t.time(), query, case_id, "up" if vote == "up" else "down"),
+    )
+    conn.commit()
+    conn.close()
+    metrics.incr("feedback_" + ("up" if vote == "up" else "down"))
 
 
 def store_case(conn, title, source, text, excerpt, industry, fields, chunks):
@@ -345,7 +377,7 @@ def _ranks(order):
     return r
 
 
-def _rank_cases(ix, query):
+def _rank_cases(ix, query, use_ann: bool = True):
     """事例を関連順に並べる。各要素 = {pos, cos, best}（cos=最良チャンクの類似度）。"""
     chunk_emb = ix["chunk_emb"]
     chunk_by_case = ix["chunk_by_case"]
@@ -369,14 +401,15 @@ def _rank_cases(ix, query):
         )
 
     M = chunk_emb.shape[0]
-    if ix.get("ann") is not None:
+    if use_ann and ix.get("ann") is not None:
         # ANN: 上位近傍チャンクだけ取得（取得外は -1 とし、対象事例を絞る）
         k = min(ANN_K, M)
         labels, dists = ix["ann"].knn_query(qv, k=k)
         chunk_cos = np.full(M, -1.0, dtype=np.float32)
         chunk_cos[labels[0]] = (1.0 - dists[0]).astype(np.float32)
+        metrics.incr("ann_queries")
     else:
-        chunk_cos = chunk_emb @ qv  # (M,) 総当たり
+        chunk_cos = chunk_emb @ qv  # (M,) 総当たり（業種フィルタ時はこちらで正確に）
 
     case_cos = np.full(C, -1.0)
     best = np.zeros(C, dtype=np.int64)
@@ -423,8 +456,10 @@ def _rank_cases(ix, query):
 
 def _scored(ix, query: str, industry: str = ""):
     """候補に統一関連度 rel を付与し、rel 降順で返す（業種フィルタ済み）。"""
+    # 業種フィルタ時は ANN を使わず総当たりにして、ニッチ業種の取りこぼしを防ぐ
+    use_ann = not industry
     out = []
-    for c in _rank_cases(ix, query):
+    for c in _rank_cases(ix, query, use_ann=use_ann):
         if industry and ix["meta"][c["pos"]]["industry"] != industry:
             continue
         c["rel"] = candidate_relevance(c)
@@ -459,8 +494,12 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     if cached is not None:
         return cached
 
+    metrics.incr("searches")
+    _timer = metrics.timed("search")
+    _timer.__enter__()
     ix = get_index()
     if not ix["meta"]:
+        _timer.__exit__()
         return {"nodes": [], "edges": [], "hidden": 0}
 
     nodes, hidden = [], 0
@@ -489,6 +528,7 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
         n.pop("_idx", None)
     result = {"nodes": nodes, "edges": edges, "hidden": hidden}
     _RESULT_CACHE.put(ckey, result)
+    _timer.__exit__()
     return result
 
 

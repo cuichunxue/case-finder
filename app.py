@@ -11,23 +11,33 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 
 from flask import (
     Flask,
     Response,
+    g,
     jsonify,
     render_template,
     request,
     send_from_directory,
+    stream_with_context,
 )
 
 import azure_ai
 import cache
 import ingest
 import jobs
+import metrics
 import ocr
 import search
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("case-finder")
 
 app = Flask(__name__)
 
@@ -60,7 +70,28 @@ def _unauthorized():
 
 
 # 外部送信・課金を伴う読み取り系も「書き込み相当」として保護する
-PRIVILEGED_PATHS = {"/api/answer"}
+PRIVILEGED_PATHS = {"/api/answer", "/api/answer_stream"}
+
+
+@app.before_request
+def _timer_start():
+    import time
+    g._t0 = time.perf_counter()
+
+
+@app.after_request
+def _access_log(resp):
+    try:
+        import time
+        dt = (time.perf_counter() - getattr(g, "_t0", 0.0)) * 1000.0
+        if request.path.startswith("/api/"):
+            # クエリ本文はプライバシー配慮でログに残さない（長さのみ）
+            qlen = len(request.args.get("q", ""))
+            log.info("%s %s %d %.0fms qlen=%d", request.method, request.path,
+                     resp.status_code, dt, qlen)
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
 
 
 @app.before_request
@@ -106,6 +137,28 @@ def api_search():
 @app.route("/api/stats")
 def api_stats():
     return jsonify(search.stats())
+
+
+@app.route("/api/metrics")
+def api_metrics():
+    m = metrics.snapshot()
+    m["cache"] = {"result": search._RESULT_CACHE.stats(), "answer": _ANSWER_CACHE.stats()}
+    return jsonify(m)
+
+
+@app.route("/api/feedback", methods=["POST"])
+def api_feedback():
+    q = (request.form.get("q") or "").strip()
+    vote = request.form.get("vote", "")
+    case_id = request.form.get("case_id")
+    if vote not in ("up", "down"):
+        return jsonify({"error": "vote は up/down"}), 400
+    try:
+        case_id = int(case_id) if case_id not in (None, "") else None
+    except ValueError:
+        case_id = None
+    search.record_feedback(q, case_id, vote)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/answer")
@@ -182,6 +235,45 @@ def api_job(job_id):
     return jsonify(job)
 
 
+def _sse(obj):
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+@app.route("/api/answer_stream")
+def api_answer_stream():
+    """SSEで「検索結果→要約トークン→出典」を逐次配信（Azure有効時）。"""
+    q = request.args.get("q", "").strip()
+    industry = request.args.get("industry", "").strip()
+    top_k = int(request.args.get("k", 6))
+    min_rel = search.WEAK_REL if request.args.get("loose") else None
+    try:
+        result = search.search(q, top_k=top_k, industry=industry, min_rel=min_rel)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+
+    def gen():
+        yield _sse({"type": "results", **result})
+        nodes = result["nodes"]
+        if not azure_ai.available():
+            yield _sse({"type": "noai", "reason": "Azure未設定"})
+        elif not nodes:
+            yield _sse({"type": "noai", "reason": "該当事例なし"})
+        else:
+            try:
+                for kind, val in azure_ai.synthesize_stream(q, nodes):
+                    if kind == "token":
+                        yield _sse({"type": "token", "text": val})
+                    elif kind == "citations":
+                        yield _sse({"type": "citations", "citations": val})
+                    elif kind == "done":
+                        yield _sse({"type": "done", "model": val})
+            except Exception as e:  # noqa: BLE001
+                yield _sse({"type": "error", "reason": str(e)})
+        yield _sse({"type": "end"})
+
+    return Response(stream_with_context(gen()), mimetype="text/event-stream")
+
+
 @app.route("/data/<path:filename>")
 def data_file(filename):
     """検索結果から元の PPT/PDF を開けるようにする。"""
@@ -193,6 +285,9 @@ def _run():
     if not AUTH_PASSWORD and not WRITE_PASSWORD:
         print("※ 認証なしで公開します（読み書きとも自由）。社外秘なら CASE_FINDER_PASSWORD"
               " か CASE_FINDER_WRITE_PASSWORD の設定を推奨。")
+    elif WRITE_PASSWORD and not AUTH_PASSWORD:
+        print("※ 読み取りは無認証です。検索結果や元ファイル(/data)も誰でも閲覧できます。"
+              "社外秘の本文を守るには CASE_FINDER_PASSWORD（全体認証）を推奨。")
     jobs.warmup()  # 埋め込みモデルを先読みして初回検索を速く
     print(f"\n事例ファインダーを起動します → http://0.0.0.0:{port}")
     print("同じネットワークの人は http://<このPCのIP>:%d で使えます。\n" % port)

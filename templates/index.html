@@ -81,6 +81,10 @@
   .answer .cites{margin-top:10px; font-size:12px; color:var(--sub);}
   .answer .cites a{color:var(--accent2); text-decoration:none;}
   .answer .warn{margin-top:8px; font-size:11px; color:var(--sub);}
+  .fb{margin-top:8px; display:flex; gap:8px;}
+  .fbbtn{background:none; border:1px solid var(--line); border-radius:6px; cursor:pointer;
+    font-size:12px; padding:1px 7px; color:var(--ink);}
+  .fbbtn:hover{border-color:var(--accent);}
   @media (prefers-reduced-motion: reduce){ *{animation:none!important; transition:none!important;} }
 </style>
 </head>
@@ -147,22 +151,77 @@ async function run(loose){
   const industry = $("#industry").value;
   const useAI = $("#aiToggle") && $("#aiToggle").checked;
   $("#result").innerHTML = `<div class="empty">${useAI ? "検索＋AI要約中…" : "検索中…"}</div>`;
+  if(useAI){ return runAI(q, industry, loose); }
   try{
-    // AI ON のときは /api/answer 一本（検索結果も同梱されるため二重検索しない）
-    const base = useAI ? "/api/answer" : "/api/search";
-    const url = base + "?q=" + encodeURIComponent(q)
-      + "&industry=" + encodeURIComponent(industry) + "&k=6"
-      + (loose ? "&loose=1" : "");
+    const url = "/api/search?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
     const data = await (await fetch(url)).json();
-    if(data.error){
-      $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`;
-      return;
-    }
+    if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
     lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
     render(lastData, null);
-    if(useAI) showAnswer(data);
   }catch(e){
     $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}（モデルの初回DL中・未準備の可能性）</div>`;
+  }
+}
+
+// AI ON: SSEで検索結果→要約を逐次表示（単一リクエスト）。失敗時は非ストリームへ。
+async function runAI(q, industry, loose){
+  const url = "/api/answer_stream?q=" + encodeURIComponent(q)
+    + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
+  const ensureBox = () => {
+    let b = document.getElementById("answerBox");
+    if(!b){ b = document.createElement("div"); b.id = "answerBox"; b.className = "answer"; $("#result").prepend(b); }
+    return b;
+  };
+  try{
+    const resp = await fetch(url);
+    if(!resp.ok || !resp.body) return runAIFallback(q, industry, loose);
+    const reader = resp.body.getReader(); const dec = new TextDecoder();
+    let buf = "", answer = "", cites = null;
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream: true});
+      let i;
+      while((i = buf.indexOf("\n\n")) >= 0){
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if(!line.startsWith("data:")) continue;
+        let ev; try{ ev = JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
+        if(ev.type === "results"){
+          lastData = {nodes: ev.nodes || [], edges: ev.edges || [], hidden: ev.hidden || 0};
+          render(lastData, null);
+          ensureBox().innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" id="ansBody">…</div>`;
+        } else if(ev.type === "noai"){
+          ensureBox().innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">要約は利用できません（${esc(ev.reason||"不明")}）。</div>`;
+        } else if(ev.type === "token"){
+          answer += ev.text; const b = document.getElementById("ansBody"); if(b) b.textContent = answer;
+        } else if(ev.type === "citations"){ cites = ev.citations; }
+        else if(ev.type === "done"){ finalizeAnswer(ensureBox(), answer, cites, ev.model); }
+        else if(ev.type === "error"){ const b = document.getElementById("ansBody"); if(b) b.innerHTML = `<span style="color:var(--sub)">生成に失敗：${esc(ev.reason||"")}</span>`; }
+      }
+    }
+  }catch(e){ runAIFallback(q, industry, loose); }
+}
+
+function finalizeAnswer(box, answer, cites, model){
+  const c = (cites || []).map(x =>
+    `[${x.n}] <a href="/${esc(x.source)}" target="_blank">${esc(x.title)}</a>`).join("　");
+  box.innerHTML = `<h4>AIによる要約（Azure・${esc(model||"")}）</h4>
+    <div class="body">${highlight(answer, [])}</div>
+    <div class="cites">出典　${c}</div>
+    <div class="warn">※ この要約のためクエリと上位事例が Azure に送信されています。</div>`;
+}
+
+async function runAIFallback(q, industry, loose){
+  try{
+    const url = "/api/answer?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
+    const data = await (await fetch(url)).json();
+    if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
+    lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
+    render(lastData, null); showAnswer(data);
+  }catch(e){
+    $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}</div>`;
   }
 }
 
@@ -270,15 +329,31 @@ function render(data, selectedId){
 
 function renderList(nodes){
   $("#side").innerHTML = `<div class="list">` + nodes.map(c => `
-    <button class="item" data-id="${c.id}">
+    <div class="item" data-id="${c.id}">
       <div class="item-top">
         <span class="item-title">${esc(c.title)}</span>
         ${matchBadge(c)}
       </div>
       <div class="item-sub">${esc(c.problem || c.excerpt)}</div>
-    </button>`).join("") + `</div>`;
+      <div class="fb">
+        <button class="fbbtn" data-id="${c.id}" data-vote="up" title="役に立った">👍</button>
+        <button class="fbbtn" data-id="${c.id}" data-vote="down" title="違う">👎</button>
+      </div>
+    </div>`).join("") + `</div>`;
   document.querySelectorAll(".item").forEach(el =>
     el.onclick = () => render(lastData, parseInt(el.dataset.id)));
+  document.querySelectorAll(".fbbtn").forEach(b =>
+    b.onclick = (e) => { e.stopPropagation(); sendFeedback(b.dataset.id, b.dataset.vote, b); });
+}
+
+function sendFeedback(id, vote, btn){
+  const fd = new FormData();
+  fd.append("q", $("#q").value.trim());
+  fd.append("case_id", id);
+  fd.append("vote", vote);
+  fetch("/api/feedback", {method: "POST", body: fd})
+    .then(r => r.json()).then(() => { if(btn){ btn.disabled = true; btn.style.opacity = .5; } })
+    .catch(() => {});
 }
 
 function renderDetail(c, nodes){

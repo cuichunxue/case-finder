@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+tests
+store
+cases.db
+data/*
+!data/.gitkeep
+eval.json

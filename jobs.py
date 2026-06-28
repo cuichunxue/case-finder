@@ -119,5 +119,11 @@ def warmup():
             search.embed(["warmup"], "query")
         except Exception:  # noqa: BLE001
             pass  # モデル未DL等は実検索時に顕在化させる
+        try:
+            import rerank
+
+            rerank.available()  # リランカーも先読みし、初回検索の遅延を解消
+        except Exception:  # noqa: BLE001
+            pass
 
     threading.Thread(target=_run, name="warmup", daemon=True).start()

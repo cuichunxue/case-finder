@@ -27,6 +27,8 @@ import os
 
 import numpy as np
 
+import metrics
+
 ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
 API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-06-01")
@@ -158,4 +160,36 @@ def synthesize(query: str, cases: list) -> dict:
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
     )
     answer = (r.choices[0].message.content or "").strip()
+    metrics.incr("azure_synth")
+    try:
+        metrics.incr("azure_tokens", float(r.usage.total_tokens))
+    except Exception:  # noqa: BLE001
+        pass
     return {"answer": answer, "citations": citations, "model": CHAT_DEPLOYMENT}
+
+
+def synthesize_stream(query: str, cases: list):
+    """RAG要約をトークン単位でストリーミングする。最後に citations を返すジェネレータ。
+
+    yield 形式: ("token", 文字列) を逐次、最後に ("citations", list) と ("done", model)。
+    """
+    client = _client()
+    context, citations = _format_cases(cases)
+    system = (
+        "あなたは社内の事例検索アシスタントです。次のルールに厳密に従ってください。\n"
+        "1) 回答は必ず『提供された事例』のみを根拠にする。事例にない情報は創作しない。\n"
+        "2) 各主張の文末に出典番号 [n] を付ける（複数可）。\n"
+        "3) ユーザーの課題に対し、参考になる打ち手と理由を日本語で簡潔に（箇条書き可）。\n"
+        "4) 関連が薄い場合は、その旨を正直に述べる。"
+    )
+    user = f"# ユーザーの課題\n{query}\n\n# 提供された事例\n{context}\n\n# 出力\n課題への示唆を、出典[n]つきでまとめてください。"
+    metrics.incr("azure_synth_stream")
+    stream = client.chat.completions.create(
+        model=CHAT_DEPLOYMENT, temperature=0.2, max_tokens=700, stream=True,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+    )
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+            yield ("token", chunk.choices[0].delta.content)
+    yield ("citations", citations)
+    yield ("done", CHAT_DEPLOYMENT)
