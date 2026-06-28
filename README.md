@@ -125,7 +125,14 @@ export CASE_FINDER_EMBED_BACKEND=azure   # 使う場合は取り込みも同設�
 python app.py
 ```
 画面では、Azureが有効なときだけ「🧠 AIで要約（Azure）」トグルが現れます。
-API は `GET /api/answer?q=...`（`{answer, citations, nodes}` を返す。Azure無効時は `answer:null`）。
+API は `GET /api/answer?q=...`。**検索結果(nodes/edges/hidden)も同梱して返す**ため、
+AI要約ON時もフロントは1リクエストで完結します（二重検索なし）。Azure無効時は `answer:null`。
+
+`/api/answer` は外部送信・課金を伴うため、**書き込みと同じ認証ゲート**で保護されます
+（`CASE_FINDER_PASSWORD` か `CASE_FINDER_WRITE_PASSWORD` 設定時は要認証）。
+Azure呼び出しには `CASE_FINDER_AZURE_TIMEOUT`（既定30秒）/ `CASE_FINDER_AZURE_RETRIES`（既定1）が効きます。
+埋め込みバックエンドを切り替えた場合は、次元が変わるため必ず `python ingest.py` で再取り込みしてください
+（不一致は検知してエラー表示します）。
 
 ## テスト
 ```bash

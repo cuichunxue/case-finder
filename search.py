@@ -325,6 +325,12 @@ def _rank_cases(ix, query):
             dense_query = query + "\n" + extra
 
     qv = embed([dense_query], "query")[0]
+    if qv.shape[0] != chunk_emb.shape[1]:
+        raise RuntimeError(
+            "埋め込み次元が保存データと一致しません"
+            f"（クエリ {qv.shape[0]} 次元 / 保存 {chunk_emb.shape[1]} 次元）。"
+            "EMBED_BACKEND を変更した場合は `python ingest.py` で再取り込みしてください。"
+        )
     chunk_cos = chunk_emb @ qv  # (M,)
 
     case_cos = np.full(C, -1.0)

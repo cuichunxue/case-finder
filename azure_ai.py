@@ -35,6 +35,8 @@ EMBED_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBED_DEPLOYMENT", "")
 
 AZURE_ON = os.environ.get("CASE_FINDER_AZURE", "off").lower() in ("on", "1", "true")
 EXPAND_ON = os.environ.get("CASE_FINDER_AZURE_EXPAND", "off").lower() in ("on", "1", "true")
+TIMEOUT = float(os.environ.get("CASE_FINDER_AZURE_TIMEOUT", "30"))
+MAX_RETRIES = int(os.environ.get("CASE_FINDER_AZURE_RETRIES", "1"))
 
 _state = {"client": None, "failed": False}
 
@@ -50,7 +52,8 @@ def _client():
         from openai import AzureOpenAI
 
         _state["client"] = AzureOpenAI(
-            azure_endpoint=ENDPOINT, api_key=API_KEY, api_version=API_VERSION
+            azure_endpoint=ENDPOINT, api_key=API_KEY, api_version=API_VERSION,
+            timeout=TIMEOUT, max_retries=MAX_RETRIES,
         )
         return _state["client"]
     except Exception:  # noqa: BLE001

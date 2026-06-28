@@ -52,9 +52,13 @@ def _unauthorized():
     )
 
 
+# 外部送信・課金を伴う読み取り系も「書き込み相当」として保護する
+PRIVILEGED_PATHS = {"/api/answer"}
+
+
 @app.before_request
 def _require_auth():
-    is_write = request.method in ("POST", "PUT", "DELETE")
+    is_write = request.method in ("POST", "PUT", "DELETE") or request.path in PRIVILEGED_PATHS
     if is_write:
         # 書き込みは、全体パスワードか書き込み専用パスワードのいずれかで許可
         pws = {p for p in (AUTH_PASSWORD, WRITE_PASSWORD) if p}
@@ -86,7 +90,10 @@ def api_search():
     top_k = int(request.args.get("k", 6))
     # loose=1 で「関連が弱い候補」も含める（足切りを WEAK_REL まで下げる）
     min_rel = search.WEAK_REL if request.args.get("loose") else None
-    return jsonify(search.search(q, top_k=top_k, industry=industry, min_rel=min_rel))
+    try:
+        return jsonify(search.search(q, top_k=top_k, industry=industry, min_rel=min_rel))
+    except Exception as e:  # noqa: BLE001  次元不一致など
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/stats")
@@ -102,21 +109,24 @@ def api_answer():
     """
     q = request.args.get("q", "").strip()
     industry = request.args.get("industry", "").strip()
-    top_k = int(request.args.get("k", 5))
-    result = search.search(q, top_k=top_k, industry=industry)
+    top_k = int(request.args.get("k", 6))  # 検索表示と同じ件数に統一
+    min_rel = search.WEAK_REL if request.args.get("loose") else None
+    try:
+        result = search.search(q, top_k=top_k, industry=industry, min_rel=min_rel)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
     nodes = result["nodes"]
+    # 検索結果(nodes/edges/hidden)も同梱して返し、フロントの二重検索を避ける
     if not azure_ai.available():
-        return jsonify({"answer": None, "reason": "Azure未設定", "nodes": nodes})
+        return jsonify({**result, "answer": None, "reason": "Azure未設定"})
     if not nodes:
-        return jsonify({"answer": None, "reason": "該当事例なし", "nodes": nodes})
+        return jsonify({**result, "answer": None, "reason": "該当事例なし"})
     try:
         out = azure_ai.synthesize(q, nodes)
     except Exception as e:  # noqa: BLE001
-        return jsonify({"answer": None, "reason": f"生成に失敗: {e}", "nodes": nodes})
-    return jsonify({
-        "answer": out["answer"], "citations": out["citations"],
-        "model": out.get("model"), "nodes": nodes,
-    })
+        return jsonify({**result, "answer": None, "reason": f"生成に失敗: {e}"})
+    return jsonify({**result, "answer": out["answer"],
+                    "citations": out["citations"], "model": out.get("model")})
 
 
 @app.route("/api/upload", methods=["POST"])

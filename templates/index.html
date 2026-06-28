@@ -145,48 +145,44 @@ async function run(loose){
   const q = $("#q").value.trim();
   if(!q) return;
   const industry = $("#industry").value;
-  $("#result").innerHTML = `<div class="empty">検索中…</div>`;
+  const useAI = $("#aiToggle") && $("#aiToggle").checked;
+  $("#result").innerHTML = `<div class="empty">${useAI ? "検索＋AI要約中…" : "検索中…"}</div>`;
   try{
-    const url = "/api/search?q=" + encodeURIComponent(q)
-      + "&industry=" + encodeURIComponent(industry)
+    // AI ON のときは /api/answer 一本（検索結果も同梱されるため二重検索しない）
+    const base = useAI ? "/api/answer" : "/api/search";
+    const url = base + "?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry) + "&k=6"
       + (loose ? "&loose=1" : "");
     const data = await (await fetch(url)).json();
-    lastData = data;
-    render(data, null);
-    if($("#aiToggle") && $("#aiToggle").checked) runAnswer();
+    if(data.error){
+      $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`;
+      return;
+    }
+    lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
+    render(lastData, null);
+    if(useAI) showAnswer(data);
   }catch(e){
     $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}（モデルの初回DL中・未準備の可能性）</div>`;
   }
 }
 
-async function runAnswer(){
-  const q = $("#q").value.trim();
-  if(!q) return;
-  const industry = $("#industry").value;
-  // 結果の上に要約プレースホルダを差し込む
+function showAnswer(a){
   let box = document.getElementById("answerBox");
   if(!box){
     box = document.createElement("div");
     box.id = "answerBox"; box.className = "answer";
     $("#result").prepend(box);
   }
-  box.innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body">生成中…</div>`;
-  try{
-    const url = "/api/answer?q=" + encodeURIComponent(q) + "&industry=" + encodeURIComponent(industry);
-    const a = await (await fetch(url)).json();
-    if(!a.answer){
-      box.innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">要約は利用できません（${esc(a.reason||"不明")}）。</div>`;
-      return;
-    }
-    const cites = (a.citations || []).map(c =>
-      `[${c.n}] <a href="/${esc(c.source)}" target="_blank">${esc(c.title)}</a>`).join("　");
-    box.innerHTML = `<h4>AIによる要約（Azure・${esc(a.model||"")}）</h4>
-      <div class="body">${highlight(a.answer, [])}</div>
-      <div class="cites">出典　${cites}</div>
-      <div class="warn">※ この要約のためクエリと上位事例が Azure に送信されています。</div>`;
-  }catch(e){
-    box.innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">生成に失敗しました：${esc(String(e))}</div>`;
+  if(!a.answer){
+    box.innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">要約は利用できません（${esc(a.reason||"不明")}）。</div>`;
+    return;
   }
+  const cites = (a.citations || []).map(c =>
+    `[${c.n}] <a href="/${esc(c.source)}" target="_blank">${esc(c.title)}</a>`).join("　");
+  box.innerHTML = `<h4>AIによる要約（Azure・${esc(a.model||"")}）</h4>
+    <div class="body">${highlight(a.answer, [])}</div>
+    <div class="cites">出典　${cites}</div>
+    <div class="warn">※ この要約のためクエリと上位事例が Azure に送信されています。</div>`;
 }
 
 async function upload(){
@@ -390,10 +386,7 @@ $("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(false); });
 $("#industry").addEventListener("change", () => { if($("#q").value.trim()) run(false); });
 $("#toggleUpload").onclick = () => $("#uploader").classList.toggle("open");
 $("#uploadBtn").onclick = upload;
-$("#aiToggle").addEventListener("change", () => {
-  if($("#aiToggle").checked){ if($("#q").value.trim()) runAnswer(); }
-  else { const b = document.getElementById("answerBox"); if(b) b.remove(); }
-});
+$("#aiToggle").addEventListener("change", () => { if($("#q").value.trim()) run(false); });
 loadStats();
 </script>
 </body>

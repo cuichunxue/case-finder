@@ -193,6 +193,25 @@ def test_auth_full_and_write_only(env, monkeypatch):
     monkeypatch.setattr(app, "WRITE_PASSWORD", "w")
     assert c.get("/api/stats").status_code == 200
     assert c.post("/api/upload").status_code == 401
+    # 外部送信・課金を伴う /api/answer も書き込み相当として保護される
+    assert c.get("/api/answer?q=x").status_code == 401
+
+
+# ── 埋め込み次元の不一致をガードしてerror JSONを返す ──
+def test_embed_dim_mismatch_guarded(env, monkeypatch):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0)  # 2次元で保存
+    conn.close()
+    s.invalidate_cache()
+    # クエリだけ3次元を返すよう壊す → 検知してerror
+    monkeypatch.setattr(s, "embed", lambda texts, kind: np.zeros((1, 3), dtype=np.float32))
+    r = c = app.app.test_client().get("/api/search?q=hello")
+    assert r.status_code == 400
+    assert "error" in r.get_json()
 
 
 # ── API: 非同期アップロード → ジョブ完了 ──
