@@ -23,6 +23,8 @@ from functools import lru_cache
 
 ENGINE = os.environ.get("CASE_FINDER_OCR_ENGINE", "easyocr").lower()
 OCR_DPI = int(os.environ.get("CASE_FINDER_OCR_DPI", "220"))
+# この信頼度未満のOCR結果は捨てる（誤認識テキストの索引混入を防ぐ）
+OCR_MIN_CONF = float(os.environ.get("CASE_FINDER_OCR_MIN_CONF", "0.4"))
 # EasyOCR の言語（日本語＋英語）。Tesseract は "jpn+eng"。
 EASYOCR_LANGS = os.environ.get("CASE_FINDER_OCR_LANG_EASYOCR", "ja,en").split(",")
 TESSERACT_LANG = os.environ.get("CASE_FINDER_OCR_LANG_TESSERACT", "jpn+eng")
@@ -50,13 +52,21 @@ def _easyocr_reader():
     return easyocr.Reader(EASYOCR_LANGS, gpu=device.use_gpu(), verbose=False)
 
 
+def _filter_ocr(results, min_conf: float) -> str:
+    """EasyOCR の (bbox, text, conf) 列から低信頼を除外して連結（純関数・テスト用）。"""
+    return "\n".join(
+        t for (_b, t, c) in results if c >= min_conf and str(t).strip()
+    ).strip()
+
+
 def _easyocr_image(img_bytes: bytes) -> str:
     import numpy as np
     from PIL import Image
 
     img = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-    lines = _easyocr_reader().readtext(img, detail=0, paragraph=True)
-    return "\n".join(lines).strip()
+    # detail=1 で信頼度を取得し、しきい値で誤認識を除外
+    results = _easyocr_reader().readtext(img, detail=1, paragraph=False)
+    return _filter_ocr(results, OCR_MIN_CONF)
 
 
 # ──────────────────────────────────────────────────────────────

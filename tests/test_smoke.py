@@ -560,6 +560,65 @@ def test_tokenizer_char(env, monkeypatch):
     assert "離職" in toks and "abc" in toks
 
 
+# ── 近重複の抑制＋find_duplicates ──
+def test_dedup(env, monkeypatch):
+    import numpy as np
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    v = np.array([1.0, 0.0], dtype=np.float32)
+    s.store_case(conn, "A", "a.txt", "離職の課題", "e", "", {}, [("離職の課題", v)])
+    s.store_case(conn, "A-copy", "a2.txt", "離職の課題", "e", "", {}, [("離職の課題", v)])  # 同一ベクトル
+    s.store_case(conn, "B", "b.txt", "別件", "e", "", {}, [("別件", np.array([0.0, 1.0], dtype=np.float32))])
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.0)
+    monkeypatch.setattr(s, "DEDUP", True)
+
+    r = s.search("q", top_k=6)
+    titles = [n["title"] for n in r["nodes"]]
+    assert titles.count("A") + titles.count("A-copy") == 1  # 近重複は1件に集約
+    assert r["duplicates"] >= 1
+    groups = s.find_duplicates()
+    assert any(set(g["titles"]) == {"A", "A-copy"} for g in groups)
+
+
+# ── ANN recall 実測（tiny corpus は ~1.0） ──
+def test_ann_recall(env, monkeypatch):
+    import importlib.util
+
+    import pytest
+    if importlib.util.find_spec("hnswlib") is None:
+        pytest.skip("hnswlib 未導入")
+    import numpy as np
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    for i in range(6):
+        ang = i / 6.0
+        v = np.array([np.cos(ang), np.sin(ang)], dtype=np.float32)
+        s.store_case(conn, f"C{i}", f"c{i}.txt", f"内容{i}", "e", "", {}, [(f"内容{i}", v)])
+    conn.close()
+    s.invalidate_cache()
+    monkeypatch.setattr(s, "ANN", "on")
+    monkeypatch.setattr(s, "ANN_MIN", 1)
+    monkeypatch.setattr(s, "ANN_K", 10)
+    s.invalidate_cache()
+    rec = s.ann_recall(k=3, n_probe=6)
+    assert rec is not None and rec >= 0.99  # 小規模なら近似損失ほぼ0
+
+
+# ── OCR信頼度フィルタ（純関数） ──
+def test_ocr_conf_filter():
+    import ocr
+
+    results = [(None, "良い文字", 0.9), (None, "ノイズ", 0.1), (None, "  ", 0.95)]
+    assert ocr._filter_ocr(results, 0.4) == "良い文字"
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

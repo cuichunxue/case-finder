@@ -49,9 +49,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(extract, "embed", _fake_embed)
     monkeypatch.setattr(ingest, "embed", _fake_embed)
 
-    # 既定はリランカー無効・ハイブリッド無効で決定的に（各テストで切替）。
+    # 既定はリランカー無効・ハイブリッド無効・デデュープ無効で決定的に（各テストで切替）。
     monkeypatch.setattr(rerank, "available", lambda: False)
     monkeypatch.setattr(search, "HYBRID", "off")
+    monkeypatch.setattr(search, "DEDUP", False)
 
     extract._prototypes.cache_clear()
     extract._industry_protos.cache_clear()

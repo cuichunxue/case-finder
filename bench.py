@@ -140,6 +140,10 @@ def main(argv):
     if n < 20:
         print("\n注意: クエリ数が少なく信頼区間が広いです。実務では50〜100クエリを推奨。")
 
+    r = search.ann_recall()
+    if r is not None:
+        print(f"\nANN recall@10 (vs 総当たり): {r:.3f}  （1.0に近いほど近似損失が小さい）")
+
 
 if __name__ == "__main__":
     main(sys.argv[1:])

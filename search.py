@@ -74,6 +74,10 @@ HYBRID = os.environ.get("CASE_FINDER_HYBRID", "auto")  # auto|off
 RRF_K = int(os.environ.get("CASE_FINDER_RRF_K", "60"))
 RERANK_TOP = int(os.environ.get("CASE_FINDER_RERANK_TOP", "50"))
 
+# 近重複の抑制（検索結果から事実上同一の事例を1件に集約）
+DEDUP = os.environ.get("CASE_FINDER_DEDUP", "on").lower() != "off"
+DEDUP_THRESHOLD = float(os.environ.get("CASE_FINDER_DEDUP_THRESHOLD", "0.98"))
+
 
 # ──────────────────────────────────────────────────────────────
 # 埋め込みモデル（遅延ロード）
@@ -528,7 +532,7 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     if min_rel is None:
         min_rel = MIN_REL
     if not query.strip():
-        return {"nodes": [], "edges": [], "hidden": 0}
+        return {"nodes": [], "edges": [], "hidden": 0, "duplicates": 0}
 
     ckey = (query, industry, top_k, round(min_rel, 6), _db_mtime())
     cached = _RESULT_CACHE.get(ckey)
@@ -541,9 +545,10 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     ix = get_index()
     if not ix["meta"]:
         _timer.__exit__()
-        return {"nodes": [], "edges": [], "hidden": 0}
+        return {"nodes": [], "edges": [], "hidden": 0, "duplicates": 0}
 
-    nodes, hidden = [], 0
+    case_vec = ix["case_vec"]
+    nodes, hidden, duplicates = [], 0, 0
     for c in _scored(ix, query, industry):
         rel = c["rel"]
         if rel < WEAK_REL:
@@ -552,6 +557,12 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
             hidden += 1
             continue
         if len(nodes) >= top_k:
+            continue
+        # 近重複（事実上同一の事例）は最上位の1件だけ残す
+        if DEDUP and any(
+            float(case_vec[c["pos"]] @ case_vec[n["_idx"]]) >= DEDUP_THRESHOLD for n in nodes
+        ):
+            duplicates += 1
             continue
         m = ix["meta"][c["pos"]]
         evidence = ix["chunk_text"][c["best"]]
@@ -567,7 +578,7 @@ def search(query: str, top_k: int = 6, industry: str = "", min_rel: float | None
     edges = _edges(nodes, ix["case_vec"])
     for n in nodes:
         n.pop("_idx", None)
-    result = {"nodes": nodes, "edges": edges, "hidden": hidden}
+    result = {"nodes": nodes, "edges": edges, "hidden": hidden, "duplicates": duplicates}
     _RESULT_CACHE.put(ckey, result)
     _timer.__exit__()
     return result
@@ -584,6 +595,52 @@ def _edges(nodes, case_vec):
     sims = np.array([p[2] for p in pairs])
     thr = max(EDGE_FLOOR, float(np.percentile(sims, 70)))
     return [{"a": a, "b": b, "sim": s} for (a, b, s) in pairs if s >= thr]
+
+
+def find_duplicates(thr: float | None = None):
+    """近重複の事例群を列挙する（case_vec のコサインが閾値以上）。"""
+    thr = DEDUP_THRESHOLD if thr is None else thr
+    ix = get_index()
+    cv, meta = ix["case_vec"], ix["meta"]
+    C = len(meta)
+    if C < 2 or cv.size == 0:
+        return []
+    sims = cv @ cv.T
+    seen, groups = set(), []
+    for i in range(C):
+        if i in seen:
+            continue
+        grp = [i]
+        for j in range(i + 1, C):
+            if j not in seen and float(sims[i, j]) >= thr:
+                grp.append(j)
+                seen.add(j)
+        if len(grp) > 1:
+            seen.update(grp)
+            groups.append({"ids": [meta[g]["id"] for g in grp],
+                           "titles": [meta[g]["title"] for g in grp]})
+    return groups
+
+
+def ann_recall(k: int = 10, n_probe: int = 200, seed: int = 0):
+    """ANN近傍と総当たりの overlap@k を実測（ANN未使用なら None）。"""
+    ix = get_index()
+    if ix.get("ann") is None:
+        return None
+    emb = ix["chunk_emb"]
+    M = emb.shape[0]
+    if M == 0:
+        return None
+    rng = np.random.default_rng(seed)
+    probes = rng.choice(M, size=min(n_probe, M), replace=False)
+    kk = min(k, M)
+    rec = []
+    for p in probes:
+        q = emb[p]
+        brute = set(np.argsort(-(emb @ q))[:kk].tolist())
+        labels, _ = ix["ann"].knn_query(q, k=kk)
+        rec.append(len(brute & set(int(x) for x in labels[0])) / kk)
+    return float(np.mean(rec)) if rec else None
 
 
 def list_industries():

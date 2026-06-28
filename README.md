@@ -125,6 +125,10 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_WEAK_REL` | `0.15` | 「弱い候補も表示」で使う下限（統一関連度） |
 | `CASE_FINDER_REL_FLOOR` / `_REL_CEIL` | `WEAK_FLOOR` / `0.92` | 密コサイン→関連度の伸縮範囲 |
 | `CASE_FINDER_BM25_SAT` | `6.0` | BM25生スコアを0-1関連度に飽和変換する係数 |
+| `CASE_FINDER_DEDUP` / `_DEDUP_THRESHOLD` | `on` / `0.98` | 近重複事例を結果から集約 |
+| `CASE_FINDER_OCR_MIN_CONF` | `0.4` | この信頼度未満のOCR結果を除外 |
+| `CASE_FINDER_TOKENIZER` | `char` | `char`/`sudachi`/`auto`（語彙一致用） |
+| `CASE_FINDER_CHUNK_SIZE` / `_CHUNK_OVERLAP` | `400` / `60` | チャンク長／重なり(文字) |
 | `CASE_FINDER_RERANK` / `_RERANKER` | `auto` / 日本語CE | リランカーの有効化とモデル |
 | `CASE_FINDER_HYBRID` | `auto` | BM25ハイブリッドの有効化（`off`で密のみ） |
 | `CASE_FINDER_ANN` / `_ANN_MIN` / `_ANN_K` | `auto` / `2000` / `200` | 大規模時にhnswlibで密検索を近似高速化 |
