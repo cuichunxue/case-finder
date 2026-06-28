@@ -30,6 +30,8 @@ MODEL_NAME = os.environ.get("CASE_FINDER_MODEL", "intfloat/multilingual-e5-small
 # e5 の生コサインは無関係な日本語同士でも高め（0.75前後）に出る。
 # 「関連あり」と見なす最低ライン。これ未満は検索結果から除外する。
 MIN_SCORE = float(os.environ.get("CASE_FINDER_MIN_SCORE", "0.80"))
+# 「関連は弱いが候補に含めてよい」下限。0件時に“弱い候補も表示”で使う。
+WEAK_FLOOR = float(os.environ.get("CASE_FINDER_WEAK_FLOOR", str(max(0.0, MIN_SCORE - 0.08))))
 # 表示用の「関連度(0-100%)」へ変換する際の下限・上限（この区間を0〜100%に伸縮）。
 REL_FLOOR = float(os.environ.get("CASE_FINDER_REL_FLOOR", "0.78"))
 REL_CEIL = float(os.environ.get("CASE_FINDER_REL_CEIL", "0.92"))
@@ -205,13 +207,19 @@ def search(query: str, top_k: int = 6, industry: str = "", min_score: float | No
     scores = matrix @ qv  # (N,)
 
     nodes = []
+    hidden = 0  # 閾値未満だが WEAK_FLOOR 以上の「弱い候補」の件数
     for i in np.argsort(-scores):
         s = float(scores[i])
-        if s < min_score:
-            break  # 降順なので以降も閾値未満
+        if s < WEAK_FLOOR:
+            break  # 降順なので以降は弱い候補にも満たない
         m = meta[i]
         if industry and m["industry"] != industry:
             continue
+        if s < min_score:
+            hidden += 1
+            continue
+        if len(nodes) >= top_k:
+            continue  # これ以上は表示しないが hidden 集計は続ける
         nodes.append(
             {
                 "id": m["id"],
@@ -227,13 +235,11 @@ def search(query: str, top_k: int = 6, industry: str = "", min_score: float | No
                 "_idx": int(i),
             }
         )
-        if len(nodes) >= top_k:
-            break
 
     edges = _edges(nodes, matrix)
     for n in nodes:
         n.pop("_idx", None)
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": nodes, "edges": edges, "hidden": hidden}
 
 
 def _edges(nodes, matrix):

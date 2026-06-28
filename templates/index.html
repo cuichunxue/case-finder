@@ -124,13 +124,15 @@ async function loadStats(){
   }catch(e){ /* noop */ }
 }
 
-async function run(){
+async function run(loose){
   const q = $("#q").value.trim();
   if(!q) return;
   const industry = $("#industry").value;
   $("#result").innerHTML = `<div class="empty">検索中…</div>`;
   try{
-    const url = "/api/search?q=" + encodeURIComponent(q) + "&industry=" + encodeURIComponent(industry);
+    const url = "/api/search?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry)
+      + (loose ? "&loose=1" : "");
     const data = await (await fetch(url)).json();
     lastData = data;
     render(data, null);
@@ -145,18 +147,35 @@ async function upload(){
   const fd = new FormData();
   for(const f of input.files) fd.append("files", f);
   fd.append("industry", $("#upIndustry").value);
-  $("#upstatus").textContent = "取り込み中…（OCR/分類のため少し時間がかかります）";
+  $("#upstatus").textContent = "アップロード中…";
   try{
     const r = await (await fetch("/api/upload", {method:"POST", body:fd})).json();
     if(r.error){ $("#upstatus").textContent = "エラー：" + r.error; return; }
-    const msg = [`追加 ${r.added.length} 件`];
-    if(r.rejected && r.rejected.length) msg.push(`未対応 ${r.rejected.length} 件`);
-    $("#upstatus").textContent = msg.join(" / ") + `（登録合計 ${r.count} 件）`;
     input.value = "";
-    fillIndustries(r.industries || []);
-    $("#metatext").textContent = `登録事例 ${r.count} 件`;
+    pollJob(r.job_id, r.rejected || []);
   }catch(e){
     $("#upstatus").textContent = "アップロードに失敗しました：" + e;
+  }
+}
+
+async function pollJob(jobId, rejected){
+  try{
+    const j = await (await fetch("/api/job/" + jobId)).json();
+    if(j.error){ $("#upstatus").textContent = "エラー：" + j.error; return; }
+    if(j.status === "done"){
+      const msg = [`追加 ${j.added.length} 件`];
+      if(rejected.length) msg.push(`未対応 ${rejected.length} 件`);
+      if(j.errors && j.errors.length) msg.push(`失敗 ${j.errors.length} 件`);
+      $("#upstatus").textContent = msg.join(" / ") + `（登録合計 ${j.count} 件）`;
+      $("#metatext").textContent = `登録事例 ${j.count} 件`;
+      fillIndustries(j.industries || []);
+      return;
+    }
+    const cur = j.current ? "：" + j.current : "";
+    $("#upstatus").textContent = `取り込み中 ${j.done}/${j.total}${cur}（初回はモデル/OCRのDLで時間がかかります）`;
+    setTimeout(() => pollJob(jobId, rejected), 1000);
+  }catch(e){
+    $("#upstatus").textContent = "進捗の取得に失敗しました：" + e;
   }
 }
 
@@ -175,12 +194,22 @@ function fieldRow(label, val, color){
 
 function render(data, selectedId){
   const nodes = data.nodes || [];
+  const hidden = data.hidden || 0;
   if(!nodes.length){
-    $("#result").innerHTML = `<div class="empty">関連の高い事例が見つかりませんでした。言い回しや業種を変えるか、「＋ 事例を追加」で事例を登録してください。</div>`;
+    const more = hidden > 0
+      ? `関連が弱い候補が <b>${hidden}</b> 件あります。<br><button class="go" id="loose" style="margin-top:12px">弱い候補も表示</button>`
+      : `言い回しや業種を変えるか、「＋ 事例を追加」で事例を登録してください。`;
+    $("#result").innerHTML = `<div class="empty">関連の高い事例が見つかりませんでした。<br>${more}</div>`;
+    const lb = document.getElementById("loose");
+    if(lb) lb.onclick = () => run(true);
     return;
   }
+  const notice = hidden > 0
+    ? `<div class="meta" style="margin:0 0 12px">関連が弱い候補が ${hidden} 件隠れています
+       <button class="linkbtn" id="loose">弱い候補も表示</button></div>`
+    : "";
   const selected = selectedId ? nodes.find(n => n.id === selectedId) : null;
-  $("#result").innerHTML = `
+  $("#result").innerHTML = notice + `
     <div class="layout">
       <div class="card graph-card">
         <div id="graph"></div>
@@ -188,6 +217,8 @@ function render(data, selectedId){
       </div>
       <div id="side"></div>
     </div>`;
+  const lb = document.getElementById("loose");
+  if(lb) lb.onclick = () => run(true);
   drawGraph(data, selected ? selected.id : null);
   if(selected) renderDetail(selected, nodes);
   else renderList(nodes);
@@ -289,9 +320,9 @@ function drawGraph(data, selectedId){
 
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-$("#go").onclick = run;
-$("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(); });
-$("#industry").addEventListener("change", () => { if($("#q").value.trim()) run(); });
+$("#go").onclick = () => run(false);
+$("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(false); });
+$("#industry").addEventListener("change", () => { if($("#q").value.trim()) run(false); });
 $("#toggleUpload").onclick = () => $("#uploader").classList.toggle("open");
 $("#uploadBtn").onclick = upload;
 loadStats();

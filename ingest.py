@@ -124,13 +124,16 @@ def main(argv):
     init_db(conn)
 
     targets = list(iter_targets(argv))
-    if not targets:
+    # 引数指定で対象が無い場合のみ終了。引数なし（全体スキャン）は空でも prune を実行する。
+    if not targets and argv:
         print(f"取り込む対象がありません。{DATA_DIR}/ に PPT/PDF を置いてください。")
+        conn.close()
         return
 
     ocr_ok = ocr.available()
     print(f"OCR: {'有効（エンジン: ' + ocr.engine_name() + '）' if ocr_ok else '無効（OCRエンジン未検出。テキスト層のみ取り込み）'}")
-    print(f"埋め込みモデルを準備中…（初回のみダウンロード）")
+    if targets:
+        print(f"埋め込みモデルを準備中…（初回のみダウンロード）")
     ok = 0
     for path in targets:
         if ingest_file(conn, path, ocr_ok):

@@ -47,26 +47,49 @@ OCR エンジンが無くても、テキスト層のある PPT/PDF はそのま�
    - 同じネットワークの人は `http://<このPCのIP>:5000` でアクセス
 
 事例の追加は2通り:
-- **画面から**：上部の「＋ 事例を追加」でファイルを選び「取り込む」（業種は任意指定/自動推定）
+- **画面から**：上部の「＋ 事例を追加」でファイルを選び「取り込む」（業種は任意指定/自動推定）。
+  取り込みは**バックグラウンドで実行**され、進捗（◯/◯件）が表示されます。
 - **CLIから**：`data/` に置いて `python ingest.py` を再実行（同名は上書き、`data/` から消した事例はDBからも自動削除）
+
+検索で「関連の高い事例が無い」場合は、**「弱い候補も表示」**から関連度のしきい値を下げて再検索できます。
 
 ## 運用（みんなで使う）
 ```bash
 # 本番サーバー（waitress）で起動。社外秘ならBasic認証を有効化:
-CASE_FINDER_PASSWORD=ひみつ python app.py
+CASE_FINDER_PASSWORD=ひみつ python app.py            # 読み書きとも要認証
+CASE_FINDER_WRITE_PASSWORD=ひみつ python app.py      # 読みは自由・取り込みのみ要認証
 #   ユーザー名の既定は "user"（CASE_FINDER_USER で変更可）
 ```
-- `CASE_FINDER_PASSWORD` 未設定だと**認証なしで公開**されます（同一LAN内の誰でも閲覧可）。社外秘の事例では設定を推奨。
+- どちらも未設定だと**認証なしで公開**されます（同一LAN内の誰でも閲覧・取り込み可）。社外秘では設定を推奨。
 - `waitress` が入っていれば自動で本番サーバー、無ければ警告付きで開発サーバーになります。
+- 起動時に埋め込みモデルを先読み（warmup）するため、最初の検索の待ちが減ります。
+
+## しきい値の校正（任意・精度の作り込み）
+`MIN_SCORE` などの既定値は汎用の目安です。あなたの事例に合わせるには:
+```bash
+python ingest.py                       # 事例を登録
+cp eval.sample.json eval.json          # 評価データを用意（query と正解事例）
+python calibrate.py                    # 閾値スイープとスコア分布から推奨値を表示
+```
+出力された `CASE_FINDER_MIN_SCORE` 等を環境変数に設定して再起動すると反映されます。
 
 ### 主な環境変数
 | 変数 | 既定 | 説明 |
 |---|---|---|
 | `CASE_FINDER_MIN_SCORE` | `0.80` | これ未満の関連度は検索結果から除外 |
+| `CASE_FINDER_WEAK_FLOOR` | `MIN_SCORE-0.08` | 「弱い候補も表示」で使う下限 |
+| `CASE_FINDER_REL_FLOOR` / `_REL_CEIL` | `0.78` / `0.92` | 関連度0〜100%表示の伸縮範囲 |
 | `CASE_FINDER_OCR_ENGINE` | `easyocr` | `easyocr` / `tesseract` / `auto` |
 | `CASE_FINDER_INDUSTRIES` | （内蔵リスト） | 業種候補をカンマ区切りで上書き |
-| `CASE_FINDER_PASSWORD` | （なし） | Basic認証パスワード。設定すると認証必須 |
+| `CASE_FINDER_PASSWORD` | （なし） | 全体のBasic認証パスワード |
+| `CASE_FINDER_WRITE_PASSWORD` | （なし） | 取り込みのみ要認証にする場合 |
 | `PORT` | `5000` | 待ち受けポート |
+
+## テスト
+```bash
+pip install pytest
+pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR不要）
+```
 
 ## 仕組み（生成AI不使用）
 - 抽出: `PyMuPDF`（PDF）/ `python-pptx`（PPT）
@@ -90,14 +113,17 @@ CASE_FINDER_MODEL=intfloat/multilingual-e5-base python ingest.py
 |---|---|
 | `ingest.py` | PPT/PDF を読み取り（必要ならOCR）→ 仕分け → ベクトル化 → DB登録 |
 | `ocr.py` | 画像中心の資料を OCR で文字化（既定 EasyOCR / 代替 Tesseract） |
-| `extract.py` | BERT埋め込みで「課題/施策/成果」に分類 |
-| `search.py` | 埋め込み・DB・検索/グラフの中核ロジック |
-| `app.py` | Flask サーバー（API + 画面配信） |
-| `templates/index.html` | 画面（意味検索＋関係グラフ） |
+| `extract.py` | BERT埋め込みで「課題/施策/成果」分類・業種推定 |
+| `search.py` | 埋め込み・DB・検索/グラフ・閾値/関連度の中核ロジック |
+| `jobs.py` | 取り込みのバックグラウンド実行＋進捗＋モデルwarmup |
+| `calibrate.py` | 評価データから閾値を校正するツール |
+| `app.py` | Flask サーバー（API + 画面配信 + 認証） |
+| `templates/index.html` | 画面（意味検索＋関係グラフ＋アップロード） |
+| `tests/` | スタブ埋め込みによるスモークテスト |
 | `data/` | 事例の PPT/PDF を置く場所 |
 | `cases.db` | 事例テキスト＋ベクトルの保存先（自動生成） |
 
 ## 今後の案
 - PaddleOCR など他エンジンの追加
-- 画面からのアップロードで取り込み
-- 分類しきい値やラベル代表文の調整UI
+- 1ファイルに複数事例があるデッキのスライド/章単位チャンク化
+- 画面からの事例の削除・一覧ブラウズ
