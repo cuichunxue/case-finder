@@ -1,0 +1,9 @@
+# 生成物・依存
+cases.db
+.venv/
+__pycache__/
+*.pyc
+
+# 取り込んだ事例ファイル（社内データはコミットしない）
+data/*
+!data/.gitkeep
