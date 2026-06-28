@@ -106,6 +106,14 @@ async function run(){
 
 function matchBadge(score){ return `<span class="match">合致 ${Math.round(score*100)}%</span>`; }
 
+function fieldRow(label, val, color){
+  if(!val) return "";
+  return `<div style="margin-bottom:12px;">
+    <div class="row-label">${label}</div>
+    <div class="row-val"${color?` style="color:${color}"`:""}>${esc(val)}</div>
+  </div>`;
+}
+
 function render(data, selectedId){
   const nodes = data.nodes || [];
   if(!nodes.length){
@@ -133,7 +141,7 @@ function renderList(nodes){
         <span class="item-title">${esc(c.title)}</span>
         ${matchBadge(c.score)}
       </div>
-      <div class="item-sub">${esc(c.excerpt)}</div>
+      <div class="item-sub">${esc(c.problem || c.excerpt)}</div>
     </button>`).join("") + `</div>`;
   document.querySelectorAll(".item").forEach(el =>
     el.onclick = () => render(lastData, parseInt(el.dataset.id)));
@@ -153,10 +161,14 @@ function renderDetail(c, nodes){
       <div style="display:flex; justify-content:space-between; align-items:start; gap:8px; margin-bottom:14px;">
         <h3>${esc(c.title)}</h3>${matchBadge(c.score)}
       </div>
-      <div style="margin-bottom:12px;">
-        <div class="row-label">本文（抜粋）</div>
-        <div class="row-val">${esc(c.excerpt)}</div>
-      </div>
+      ${fieldRow("課題", c.problem)}
+      ${fieldRow("施策", c.action)}
+      ${fieldRow("成果", c.result, "var(--accent)")}
+      ${(!c.problem && !c.action && !c.result) ? `
+        <div style="margin-bottom:12px;">
+          <div class="row-label">本文（抜粋）</div>
+          <div class="row-val">${esc(c.excerpt)}</div>
+        </div>` : ""}
       <div style="margin-bottom:14px;">
         <a class="open-link" href="/${esc(c.source)}" target="_blank">元ファイルを開く（${esc(c.source)}）↗</a>
       </div>

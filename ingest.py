@@ -12,23 +12,36 @@ from __future__ import annotations
 import os
 import sys
 
+import ocr
+from extract import extract_fields
 from search import DATA_DIR, connect, embed, init_db, upsert_case
 
 SUPPORTED = (".pdf", ".pptx", ".ppt", ".txt", ".md")
 
+# テキスト層がこの文字数未満のページ/スライドは画像中心とみなし OCR にかける
+OCR_TRIGGER_CHARS = 12
 
-def extract_pdf(path: str) -> str:
+
+def extract_pdf(path: str, ocr_ok: bool) -> str:
     import fitz  # PyMuPDF
 
     parts = []
     with fitz.open(path) as doc:
         for page in doc:
-            parts.append(page.get_text())
+            t = page.get_text().strip()
+            if len(t) < OCR_TRIGGER_CHARS and ocr_ok:
+                try:
+                    t = ocr.ocr_pdf_page(page)
+                except Exception:  # noqa: BLE001
+                    pass
+            if t:
+                parts.append(t)
     return "\n".join(parts)
 
 
-def extract_pptx(path: str) -> str:
+def extract_pptx(path: str, ocr_ok: bool) -> str:
     from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
 
     prs = Presentation(path)
     parts = []
@@ -43,15 +56,21 @@ def extract_pptx(path: str) -> str:
                 for row in shape.table.rows:
                     cells = [c.text for c in row.cells]
                     parts.append(" | ".join(cells))
-    return "\n".join(parts)
+            # 画像化されたスライド/図中の文字を OCR で拾う
+            if ocr_ok and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    parts.append(ocr.ocr_image_bytes(shape.image.blob))
+                except Exception:  # noqa: BLE001
+                    pass
+    return "\n".join(p for p in parts if p.strip())
 
 
-def extract_text(path: str) -> str:
+def extract_text(path: str, ocr_ok: bool = False) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return extract_pdf(path)
+        return extract_pdf(path, ocr_ok)
     if ext in (".pptx", ".ppt"):
-        return extract_pptx(path)
+        return extract_pptx(path, ocr_ok)
     if ext in (".txt", ".md"):
         with open(path, encoding="utf-8", errors="ignore") as f:
             return f.read()
@@ -63,22 +82,26 @@ def make_excerpt(text: str, limit: int = 240) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
-def ingest_file(conn, path: str) -> bool:
+def ingest_file(conn, path: str, ocr_ok: bool) -> bool:
     title = os.path.splitext(os.path.basename(path))[0]
     source = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__)))
     try:
-        text = extract_text(path).strip()
+        text = extract_text(path, ocr_ok).strip()
     except Exception as e:  # noqa: BLE001
         print(f"  ✗ {source}: 読み取り失敗 ({e})")
         return False
     if not text:
-        print(f"  ⚠ {source}: テキストを抽出できませんでした（画像PDF等の可能性）")
+        hint = "" if ocr_ok else "（画像中心の可能性。OCRを有効にすると読める場合があります）"
+        print(f"  ⚠ {source}: テキストを抽出できませんでした{hint}")
         return False
 
+    # BERT埋め込みで「課題/施策/成果」に分類
+    fields = extract_fields(text)
     # タイトルを先頭に足して意味の手掛かりを強める
     vec = embed([f"{title}\n{text}"], "passage")[0]
-    upsert_case(conn, title, source, text, make_excerpt(text), vec)
-    print(f"  ✓ {source}  ({len(text)} 文字)")
+    upsert_case(conn, title, source, text, make_excerpt(text), fields, vec)
+    got = [name for name, key in (("課題", "problem"), ("施策", "action"), ("成果", "result")) if fields.get(key)]
+    print(f"  ✓ {source}  ({len(text)} 文字 / 抽出: {('・'.join(got)) or 'なし'})")
     return True
 
 
@@ -103,10 +126,12 @@ def main(argv):
         print(f"取り込む対象がありません。{DATA_DIR}/ に PPT/PDF を置いてください。")
         return
 
+    ocr_ok = ocr.available()
+    print(f"OCR: {'有効（Tesseract検出）' if ocr_ok else '無効（Tesseract未検出。テキスト層のみ取り込み）'}")
     print(f"埋め込みモデルを準備中…（初回のみダウンロード）")
     ok = 0
     for path in targets:
-        if ingest_file(conn, path):
+        if ingest_file(conn, path, ocr_ok):
             ok += 1
     conn.close()
     print(f"\n完了: {ok}/{len(targets)} 件を登録しました。`python app.py` で起動できます。")

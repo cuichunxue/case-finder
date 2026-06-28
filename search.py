@@ -71,23 +71,36 @@ def init_db(conn):
             source    TEXT NOT NULL UNIQUE,
             text      TEXT NOT NULL,
             excerpt   TEXT NOT NULL,
+            problem   TEXT NOT NULL DEFAULT '',
+            action    TEXT NOT NULL DEFAULT '',
+            result    TEXT NOT NULL DEFAULT '',
             embedding BLOB NOT NULL
         )
         """
     )
+    # 既存DB向けの簡易マイグレーション（不足列を追加）
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(cases)")}
+    for col in ("problem", "action", "result"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE cases ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
-def upsert_case(conn, title, source, text, excerpt, embedding: np.ndarray):
+def upsert_case(conn, title, source, text, excerpt, fields: dict, embedding: np.ndarray):
     conn.execute(
         """
-        INSERT INTO cases (title, source, text, excerpt, embedding)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO cases (title, source, text, excerpt, problem, action, result, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source) DO UPDATE SET
-            title=excluded.title, text=excluded.text,
-            excerpt=excluded.excerpt, embedding=excluded.embedding
+            title=excluded.title, text=excluded.text, excerpt=excluded.excerpt,
+            problem=excluded.problem, action=excluded.action, result=excluded.result,
+            embedding=excluded.embedding
         """,
-        (title, source, text, excerpt, embedding.astype(np.float32).tobytes()),
+        (
+            title, source, text, excerpt,
+            fields.get("problem", ""), fields.get("action", ""), fields.get("result", ""),
+            embedding.astype(np.float32).tobytes(),
+        ),
     )
     conn.commit()
 
@@ -95,7 +108,7 @@ def upsert_case(conn, title, source, text, excerpt, embedding: np.ndarray):
 def load_all(conn):
     """全事例を (メタ情報リスト, ベクトル行列) で返す。"""
     rows = conn.execute(
-        "SELECT id, title, source, text, excerpt, embedding FROM cases"
+        "SELECT id, title, source, text, excerpt, problem, action, result, embedding FROM cases"
     ).fetchall()
     meta, mats = [], []
     for r in rows:
@@ -106,6 +119,9 @@ def load_all(conn):
                 "source": r["source"],
                 "text": r["text"],
                 "excerpt": r["excerpt"],
+                "problem": r["problem"],
+                "action": r["action"],
+                "result": r["result"],
             }
         )
         mats.append(np.frombuffer(r["embedding"], dtype=np.float32))
@@ -141,6 +157,9 @@ def search(query: str, top_k: int = 6, threshold: float = 0.0):
                 "title": m["title"],
                 "source": m["source"],
                 "excerpt": m["excerpt"],
+                "problem": m["problem"],
+                "action": m["action"],
+                "result": m["result"],
                 "score": s,
                 "_idx": int(i),
             }
