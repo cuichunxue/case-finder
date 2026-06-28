@@ -43,7 +43,7 @@ _RESULT_CACHE = cache.TTLCache(CACHE_SIZE, CACHE_TTL)
 # 設定
 # ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# DB と事例フォルダは環境変数で差し替え可能（Docker のボリューム永続化用）
+# DB と事例フォルダは環境変数で差し替え可能（保存先を変えたいとき用）
 DB_PATH = os.environ.get("CASE_FINDER_DB", os.path.join(BASE_DIR, "cases.db"))
 DATA_DIR = os.environ.get("CASE_FINDER_DATA_DIR", os.path.join(BASE_DIR, "data"))
 os.makedirs(DATA_DIR, exist_ok=True)

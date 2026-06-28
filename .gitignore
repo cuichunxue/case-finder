@@ -1,6 +1,5 @@
 # 生成物・依存
 cases.db
-store/
 .venv/
 __pycache__/
 *.pyc

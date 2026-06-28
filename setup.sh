@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ローカル(非Docker)セットアップ。Python 3.10+ が必要。
+# セットアップ（venv）。Python 3.10+ が必要。
 set -e
 cd "$(dirname "$0")"
 

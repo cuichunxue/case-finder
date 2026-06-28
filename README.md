@@ -26,30 +26,21 @@ Connected Papers のように「あなたの問題」を中心にしたグラフ
 - 任意で **Azure 生成AI** を選択し、検索上位を根拠にした**要約・示唆（出典つき・逐次表示）**を生成
 - 結果への 👍/👎 フィードバック記録、稼働メトリクス（`/api/metrics`）
 
-## セットアップ
-
-### A) Docker（推奨・一番かんたん）
-```bash
-mkdir -p store/data            # 事例(PPT/PDF)は store/data に置く
-docker compose up -d --build   # http://localhost:5000
-docker compose run --rm case-finder python ingest.py   # 取り込み（初回はモデルDL）
-```
-DB・モデルキャッシュはボリュームに永続化されます。社外秘なら compose の
-`CASE_FINDER_PASSWORD` を設定してください。
-
-### B) ローカル（venv）
+## セットアップ（ローカル / venv）
 ```bash
 ./setup.sh                      # venv作成＋依存インストール
 source .venv/bin/activate
-# data/ に事例を置いてから
-python ingest.py
-./run.sh                        # = python app.py
+# data/ に事例(PPT/PDF)を置いてから
+python ingest.py                # 初回はモデルを自動DL
+./run.sh                        # = python app.py（http://localhost:5000）
 ```
 手動で行う場合:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
+保存先を変えたいときは `CASE_FINDER_DB`（DBファイル）/ `CASE_FINDER_DATA_DIR`（事例フォルダ）
+を環境変数で指定できます。
 OCR の既定エンジンは **EasyOCR**（Apache-2.0・商用利用可）です。`requirements.txt` に含まれ、
 日本語モデルは初回の取り込み時に自動ダウンロードされます。追加導入は不要です。
 
@@ -211,8 +202,7 @@ CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
 | `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |
 | `app.py` | Flask サーバー（API + 画面配信 + 認証 + メトリクス/ログ） |
 | `cache.py` / `metrics.py` | TTLキャッシュ / 稼働メトリクス |
-| `Dockerfile` / `docker-compose.yml` | コンテナ配布。`./store` にDB・事例を永続化 |
-| `setup.sh` / `run.sh` | ローカル(venv)導入・起動スクリプト |
+| `setup.sh` / `run.sh` | 導入（venv作成＋依存）・起動スクリプト |
 | `templates/index.html` | 画面（意味検索＋関係グラフ＋根拠ハイライト＋アップロード） |
 | `tests/` | スタブ埋め込みによるスモークテスト（12件） |
 | `data/` | 事例の PPT/PDF を置く場所 |
