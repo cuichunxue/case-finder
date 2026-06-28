@@ -135,6 +135,7 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_DEVICE` | `auto` | `auto`/`cpu`/`cuda`/`mps`（GPU利用） |
 | `CASE_FINDER_HOST` / `PORT` | `0.0.0.0` / `5000` | 待ち受けアドレス/ポート |
 | `CASE_FINDER_DB_TIMEOUT` | `5000` | SQLiteロック待ち(ms) |
+| `CASE_FINDER_LOG_FILE` | （なし） | 設定するとファイル出力＋ローテーション |
 
 ## Azure 生成AI（任意の選択機能）
 有効にすると、検索の上に生成AIの能力を上乗せできます。**未設定なら一切使われず、
@@ -169,10 +170,16 @@ Azure呼び出しには `CASE_FINDER_AZURE_TIMEOUT`（既定30秒）/ `CASE_FIND
 埋め込みバックエンドを切り替えた場合は、次元が変わるため必ず `python ingest.py` で再取り込みしてください
 （不一致は検知してエラー表示します）。
 
-## テスト
+## テスト / CI
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt   # もしくは: pip install pytest
 pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR/Azure不要）
+```
+GitHub Actions（`.github/workflows/ci.yml`）で push/PR 時に最小依存で自動実行します。
+
+ログをファイルに残す場合（運用）:
+```bash
+CASE_FINDER_LOG_FILE=/var/log/case-finder.log python app.py   # 自動ローテーション
 ```
 
 ## 仕組み（生成AI不使用）

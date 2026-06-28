@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # テストはスタブ埋め込みで動くため、重い依存(torch/easyocr)は不要。最小構成で高速に回す。
+      - name: Install test deps
+        run: pip install flask numpy "rank-bm25" hnswlib pytest
+      - name: Run tests
+        run: pytest -q

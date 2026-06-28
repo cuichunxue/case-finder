@@ -39,6 +39,21 @@ logging.basicConfig(
 )
 log = logging.getLogger("case-finder")
 
+# 任意: ファイル出力＋ローテーション（CASE_FINDER_LOG_FILE 設定時のみ）
+_LOG_FILE = os.environ.get("CASE_FINDER_LOG_FILE")
+if _LOG_FILE:
+    from logging.handlers import RotatingFileHandler
+
+    _fh = RotatingFileHandler(
+        _LOG_FILE,
+        maxBytes=int(os.environ.get("CASE_FINDER_LOG_MAX_BYTES", str(5 * 1024 * 1024))),
+        backupCount=int(os.environ.get("CASE_FINDER_LOG_BACKUPS", "3")),
+        encoding="utf-8",
+    )
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+    log.info("ログをファイルに出力します: %s", _LOG_FILE)
+
 app = Flask(__name__)
 
 # Azure 要約のキャッシュ（同一クエリの再課金を回避）
