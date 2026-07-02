@@ -11,9 +11,12 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import threading
+import time
 
 from flask import (
     Flask,
@@ -76,7 +79,12 @@ WRITE_PASSWORD = os.environ.get("CASE_FINDER_WRITE_PASSWORD")
 
 def _creds_ok(passwords) -> bool:
     a = request.authorization
-    return bool(a and a.username == AUTH_USER and a.password in passwords)
+    if not a or a.username is None or a.password is None:
+        return False
+    # タイミング攻撃を避けるため定数時間比較を使う
+    user_ok = hmac.compare_digest(a.username, AUTH_USER)
+    pw_ok = any(hmac.compare_digest(a.password, p) for p in passwords)
+    return user_ok and pw_ok
 
 
 def _unauthorized():
@@ -89,6 +97,26 @@ def _unauthorized():
 PRIVILEGED_PATHS = {"/api/answer", "/api/answer_stream"}
 # 認証を常に通すパス（監視用ヘルスチェック）
 PUBLIC_PATHS = {"/healthz"}
+
+# ── Azure呼び出し(要約)の簡易レート制限（クライアントIP毎・分あたり）──
+# コストの暴走と誤操作の連打を防ぐ。0 で無効。
+ANSWER_RATE = int(os.environ.get("CASE_FINDER_ANSWER_RATE", "10"))
+_rate_hits: dict[str, list[float]] = {}
+_rate_lock = threading.Lock()
+
+
+def _rate_limited(key: str) -> bool:
+    if ANSWER_RATE <= 0:
+        return False
+    now = time.time()
+    with _rate_lock:
+        q = _rate_hits.setdefault(key, [])
+        while q and now - q[0] > 60.0:
+            q.pop(0)
+        if len(q) >= ANSWER_RATE:
+            return True
+        q.append(now)
+        return False
 
 
 @app.before_request
@@ -125,7 +153,29 @@ def _require_auth():
     else:
         if AUTH_PASSWORD and not _creds_ok({AUTH_PASSWORD}):
             return _unauthorized()
+    # Azure呼び出しはレート制限（コスト保護）
+    if request.path in PRIVILEGED_PATHS and _rate_limited(request.remote_addr or "?"):
+        metrics.incr("rate_limited")
+        return jsonify({"error": "リクエストが多すぎます。1分ほど待って再試行してください。"}), 429
     return None
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
+
+
+@app.errorhandler(Exception)
+def _unhandled(e):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(e, HTTPException):
+        return e  # 404 等はそのまま
+    log.exception("未処理の例外")  # 詳細はログのみ。クライアントへは漏らさない
+    return jsonify({"error": "内部エラーが発生しました。ログを確認してください。"}), 500
 
 
 def _safe_filename(name: str) -> str:

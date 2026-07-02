@@ -619,6 +619,54 @@ def test_ocr_conf_filter():
     assert ocr._filter_ocr(results, 0.4) == "良い文字"
 
 
+# ── セキュリティヘッダが全レスポンスに付く ──
+def test_security_headers(env):
+    import app
+
+    r = app.app.test_client().get("/healthz")
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+
+
+# ── 未処理例外はトレースを漏らさず JSON 500 ──
+def test_unhandled_exception_json(env, monkeypatch):
+    import app
+
+    def boom():
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(app.search, "stats", boom)
+    c = app.app.test_client()
+    r = c.get("/api/stats")
+    assert r.status_code == 500
+    body = r.get_data(as_text=True)
+    assert "secret-internal-detail" not in body  # 内部詳細を漏らさない
+    assert "error" in r.get_json()
+
+
+# ── /api/answer のレート制限（Azureコスト保護）──
+def test_answer_rate_limit(env, monkeypatch):
+    import app
+
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 1.0)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.5)
+
+    monkeypatch.setattr(app, "ANSWER_RATE", 2)
+    app._rate_hits.clear()
+    c = app.app.test_client()
+    assert c.get("/api/answer?q=a").status_code == 200
+    assert c.get("/api/answer?q=b").status_code == 200
+    assert c.get("/api/answer?q=c").status_code == 429  # 3回目は制限
+    app._rate_hits.clear()
+
+
 def test_upload_async_job(env, monkeypatch):
     import app
     import jobs

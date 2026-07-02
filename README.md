@@ -85,6 +85,12 @@ CASE_FINDER_WRITE_PASSWORD=ひみつ python app.py      # 読みは自由・取�
 - `waitress` が入っていれば自動で本番サーバー、無ければ警告付きで開発サーバーになります。
 - 起動時に埋め込みモデル＋リランカーを先読み（warmup）するため、最初の検索の待ちが減ります。
 
+### 組み込みの安全対策
+- Basic認証は**定数時間比較**（タイミング攻撃対策）
+- 全レスポンスにセキュリティヘッダ（`nosniff` / `X-Frame-Options: DENY` / `Referrer-Policy`）
+- 未処理例外は**内部詳細を漏らさない** JSON 500（詳細はサーバーログのみ）
+- AI要約（Azure呼び出し）は**IP毎のレート制限**でコスト暴走を防止
+
 ### 安全な公開（TLS）
 Basic認証はHTTPでは**平文**です。社外秘を扱うなら次のいずれかを推奨:
 - **リバースプロキシでTLS**（例 Caddy 1行）: `case.example.lan { reverse_proxy 127.0.0.1:5000 }`
@@ -141,6 +147,7 @@ python calibrate.py                    # 閾値スイープとスコア分布か
 | `CASE_FINDER_HOST` / `PORT` | `0.0.0.0` / `5000` | 待ち受けアドレス/ポート |
 | `CASE_FINDER_DB_TIMEOUT` | `5000` | SQLiteロック待ち(ms) |
 | `CASE_FINDER_LOG_FILE` | （なし） | 設定するとファイル出力＋ローテーション |
+| `CASE_FINDER_ANSWER_RATE` | `10` | AI要約のIP毎レート制限(回/分)。0で無効 |
 
 ## Azure 生成AI（任意の選択機能）
 有効にすると、検索の上に生成AIの能力を上乗せできます。**未設定なら一切使われず、
