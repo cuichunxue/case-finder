@@ -131,6 +131,10 @@
 const PALETTE = {accent:"#4DD6C1", accent2:"#F2B441", node:"#3A4757", sub:"#8B96A5", center:"#4DD6C1"};
 const $ = (s) => document.querySelector(s);
 let lastData = null;
+let topK = 6;          // 「さらに表示」で拡張される表示件数
+let lastLoose = false; // 直前の検索が「弱い候補も表示」だったか
+// 自動抽出の欄であることを明示（誤情報リスクの注意喚起）
+const AUTO_TAG = ` <span style="color:var(--sub);font-weight:400">（自動抽出・参考）</span>`;
 
 function fillIndustries(list){
   const cur = $("#industry").value;
@@ -153,16 +157,19 @@ async function loadStats(){
   }catch(e){ /* noop */ }
 }
 
+function newSearch(){ topK = 6; run(false); }
+
 async function run(loose){
   const q = $("#q").value.trim();
   if(!q) return;
+  lastLoose = !!loose;
   const industry = $("#industry").value;
   const useAI = $("#aiToggle") && $("#aiToggle").checked;
   $("#result").innerHTML = `<div class="empty">${useAI ? "検索＋AI要約中…" : "検索中…"}</div>`;
   if(useAI){ return runAI(q, industry, loose); }
   try{
     const url = "/api/search?q=" + encodeURIComponent(q)
-      + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
+      + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
     const data = await (await fetch(url)).json();
     if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
     lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
@@ -175,7 +182,7 @@ async function run(loose){
 // AI ON: SSEで検索結果→要約を逐次表示（単一リクエスト）。失敗時は非ストリームへ。
 async function runAI(q, industry, loose){
   const url = "/api/answer_stream?q=" + encodeURIComponent(q)
-    + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
+    + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
   const ensureBox = () => {
     let b = document.getElementById("answerBox");
     if(!b){ b = document.createElement("div"); b.id = "answerBox"; b.className = "answer"; $("#result").prepend(b); }
@@ -223,7 +230,7 @@ function finalizeAnswer(box, answer, cites, model){
 async function runAIFallback(q, industry, loose){
   try{
     const url = "/api/answer?q=" + encodeURIComponent(q)
-      + "&industry=" + encodeURIComponent(industry) + "&k=6" + (loose ? "&loose=1" : "");
+      + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
     const data = await (await fetch(url)).json();
     if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
     lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
@@ -347,11 +354,15 @@ function renderList(nodes){
         <button class="fbbtn" data-id="${c.id}" data-vote="up" title="役に立った">👍</button>
         <button class="fbbtn" data-id="${c.id}" data-vote="down" title="違う">👎</button>
       </div>
-    </div>`).join("") + `</div>`;
+    </div>`).join("") + `</div>`
+    + (nodes.length >= topK ? `<div style="text-align:center; margin-top:10px">
+        <button class="linkbtn" id="moreBtn">さらに表示（+6件）</button></div>` : "");
   document.querySelectorAll(".item").forEach(el =>
     el.onclick = () => render(lastData, parseInt(el.dataset.id)));
   document.querySelectorAll(".fbbtn").forEach(b =>
     b.onclick = (e) => { e.stopPropagation(); sendFeedback(b.dataset.id, b.dataset.vote, b); });
+  const mb = document.getElementById("moreBtn");
+  if(mb) mb.onclick = () => { topK += 6; run(lastLoose); };
 }
 
 function sendFeedback(id, vote, btn){
@@ -378,15 +389,15 @@ function renderDetail(c, nodes){
       <div style="display:flex; justify-content:space-between; align-items:start; gap:8px; margin-bottom:14px;">
         <h3>${esc(c.title)}</h3>${matchBadge(c)}
       </div>
-      ${fieldRow("業種", c.industry)}
+      ${fieldRow("業種" + AUTO_TAG, c.industry)}
       ${c.evidence ? `
         <div style="margin-bottom:12px;">
           <div class="row-label">なぜ近いか（本文の該当箇所）</div>
           <div class="evidence">${highlight(c.evidence, c.matched)}</div>
         </div>` : ""}
-      ${fieldRow("課題", c.problem)}
-      ${fieldRow("施策", c.action)}
-      ${fieldRow("成果", c.result, "var(--accent)")}
+      ${fieldRow("課題" + AUTO_TAG, c.problem)}
+      ${fieldRow("施策" + AUTO_TAG, c.action)}
+      ${fieldRow("成果" + AUTO_TAG, c.result, "var(--accent)")}
       ${(!c.problem && !c.action && !c.result && !c.evidence) ? `
         <div style="margin-bottom:12px;">
           <div class="row-label">本文（抜粋）</div>
@@ -394,6 +405,10 @@ function renderDetail(c, nodes){
         </div>` : ""}
       <div style="margin-bottom:14px;">
         <a class="open-link" href="/${esc(c.source)}" target="_blank">元ファイルを開く（${esc(c.source)}）↗</a>
+      </div>
+      <div class="fb">
+        <button class="fbbtn" data-vote="up" title="この事例は役に立った">👍 役に立った</button>
+        <button class="fbbtn" data-vote="down" title="この事例は違う">👎 違う</button>
       </div>
       ${related.length ? `
         <div style="border-top:1px solid var(--line); margin:8px 0 12px;"></div>
@@ -404,6 +419,8 @@ function renderDetail(c, nodes){
       ` : ""}
     </div>`;
   $("#back").onclick = () => render(lastData, null);
+  document.querySelectorAll("#side .fbbtn").forEach(b =>
+    b.onclick = () => sendFeedback(c.id, b.dataset.vote, b));
 }
 
 function drawGraph(data, selectedId){
@@ -486,14 +503,14 @@ function renderMap(m){
   });
   svg+=`</svg>`;
   $("#map").innerHTML=svg;
-  document.querySelectorAll("#map .gnode").forEach(g=>g.onclick=()=>{ $("#q").value=g.dataset.q; run(false); });
+  document.querySelectorAll("#map .gnode").forEach(g=>g.onclick=()=>{ $("#q").value=g.dataset.q; newSearch(); });
   // クラスタ凡例
   $("#side").innerHTML = m.clusters.map(cl=>`
     <div class="cluster">
       <div class="ctitle"><span class="dot" style="background:${col(cl.id)}"></span>トピック${cl.id+1}（${cl.size}件）</div>
       <div>${(cl.keywords||[]).map(k=>`<span class="chip" data-q="${esc(k)}">${esc(k)}</span>`).join("")||'<span style="color:var(--sub);font-size:12px">—</span>'}</div>
     </div>`).join("");
-  document.querySelectorAll("#side .chip").forEach(ch=>ch.onclick=()=>{ $("#q").value=ch.dataset.q; run(false); });
+  document.querySelectorAll("#side .chip").forEach(ch=>ch.onclick=()=>{ $("#q").value=ch.dataset.q; newSearch(); });
 }
 
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -510,9 +527,9 @@ function highlight(text, terms){
   return html;
 }
 
-$("#go").onclick = () => run(false);
-$("#q").addEventListener("keydown", e => { if(e.key === "Enter") run(false); });
-$("#industry").addEventListener("change", () => { if($("#q").value.trim()) run(false); });
+$("#go").onclick = newSearch;
+$("#q").addEventListener("keydown", e => { if(e.key === "Enter") newSearch(); });
+$("#industry").addEventListener("change", () => { if($("#q").value.trim()) newSearch(); });
 $("#showMap").onclick = showMap;
 $("#toggleUpload").onclick = () => $("#uploader").classList.toggle("open");
 $("#uploadBtn").onclick = upload;

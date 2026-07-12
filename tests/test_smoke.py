@@ -143,13 +143,49 @@ def test_reranker_reorders(env, monkeypatch):
     s.invalidate_cache()
     _q10(monkeypatch, s)
     monkeypatch.setattr(s, "MIN_REL", 0.4)
-    # 候補（融合順 A,B）に対し B を高評価にするリランカーを差し込む
+    # 候補（融合順 A,B）に対し B を高評価にする logit を返すリランカーを差し込む
     monkeypatch.setattr(env.rerank, "available", lambda: True)
-    monkeypatch.setattr(env.rerank, "rerank", lambda q, texts: [0.0, 1.0])
+    monkeypatch.setattr(env.rerank, "rerank", lambda q, texts: [0.2, 4.0])  # logit想定
     r = s.search("q", top_k=6)
     # リランカーの判断（B優位）が並び順・関連度に反映される
     assert [n["title"] for n in r["nodes"]] == ["B", "A"]
     assert r["nodes"][0]["relevance"] >= r["nodes"][1]["relevance"]
+
+
+# ── 二重sigmoid防御：確率(0-1)出力はそのまま、logitはsigmoid ──
+def test_rerank_activation_auto(env, monkeypatch):
+    s = env.search
+    monkeypatch.setattr(s, "RERANK_ACTIVATION", "auto")
+    # 全て0-1 → 確率とみなしそのまま（二重sigmoidで0.5-0.73に圧縮されない）
+    assert s.rerank_scores_to_rel([0.95, 0.05]) == [0.95, 0.05]
+    # logitを含む → sigmoid変換
+    out = s.rerank_scores_to_rel([4.0, -4.0])
+    assert out[0] > 0.95 and out[1] < 0.05
+    # 明示指定も効く
+    monkeypatch.setattr(s, "RERANK_ACTIVATION", "sigmoid")
+    assert abs(s.rerank_scores_to_rel([0.0])[0] - 0.5) < 1e-9
+    monkeypatch.setattr(s, "RERANK_ACTIVATION", "none")
+    assert s.rerank_scores_to_rel([1.7])[0] == 1.0  # 0-1にクランプ
+
+
+def test_rerank_probability_no_double_sigmoid(env, monkeypatch):
+    """確率出力のリランカーでも関連度がそのまま反映される（足切りが機能する）。"""
+    s = env.search
+    conn = s.connect()
+    s.init_db(conn)
+    store_one(s, conn, "A", "a.txt", 0.90)
+    store_one(s, conn, "B", "b.txt", 0.85)
+    conn.close()
+    s.invalidate_cache()
+    _q10(monkeypatch, s)
+    monkeypatch.setattr(s, "MIN_REL", 0.4)
+    monkeypatch.setattr(env.rerank, "available", lambda: True)
+    monkeypatch.setattr(env.rerank, "rerank", lambda q, texts: [0.95, 0.10])  # 確率想定
+    r = s.search("q", top_k=6)
+    assert r["nodes"][0]["title"] == "A"
+    assert abs(r["nodes"][0]["relevance"] - 0.95) < 1e-6  # そのまま（0.72等に圧縮されない）
+    # B(0.10) は MIN_REL 未満 → 表示されず hidden 扱い
+    assert all(n["title"] != "B" for n in r["nodes"])
 
 
 # ── API: stats / search（evidence・matched付き）──

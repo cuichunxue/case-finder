@@ -73,6 +73,8 @@ BM25_SAT = float(os.environ.get("CASE_FINDER_BM25_SAT", "6.0"))
 HYBRID = os.environ.get("CASE_FINDER_HYBRID", "auto")  # auto|off
 RRF_K = int(os.environ.get("CASE_FINDER_RRF_K", "60"))
 RERANK_TOP = int(os.environ.get("CASE_FINDER_RERANK_TOP", "50"))
+# リランカー出力の解釈: auto=0-1なら確率とみなす / sigmoid=常にsigmoid / none=そのまま
+RERANK_ACTIVATION = os.environ.get("CASE_FINDER_RERANK_ACTIVATION", "auto").lower()
 
 # 近重複の抑制（検索結果から事実上同一の事例を1件に集約）
 DEDUP = os.environ.get("CASE_FINDER_DEDUP", "on").lower() != "off"
@@ -114,15 +116,33 @@ def _lex_rel(bm: float) -> float:
     return bm / (bm + BM25_SAT) if bm > 0 else 0.0
 
 
+def rerank_scores_to_rel(scores):
+    """リランカーのバッチ出力を 0-1 の関連度に変換する。
+
+    CrossEncoder はモデル/ライブラリ設定により「sigmoid済みの確率(0-1)」を返す場合と
+    「生logit」を返す場合がある。確率に再度sigmoidを掛けると全候補が0.5-0.73に
+    圧縮され足切りが無効化されるため、バッチ全体が0-1に収まる場合は確率とみなして
+    そのまま使う（auto）。CASE_FINDER_RERANK_ACTIVATION で明示上書き可。
+    """
+    scores = [float(s) for s in scores]
+    if RERANK_ACTIVATION == "none":
+        return [max(0.0, min(1.0, s)) for s in scores]
+    if RERANK_ACTIVATION == "sigmoid":
+        return [_sigmoid(s) for s in scores]
+    if scores and all(0.0 <= s <= 1.0 for s in scores):
+        return scores  # 既に確率
+    return [_sigmoid(s) for s in scores]
+
+
 def candidate_relevance(c: dict) -> float:
     """候補の統一関連度(0-1)。判断に使った信号を優先する。
 
-      - リランカーが効いた候補 -> sigmoid(リランクスコア)
+      - リランカーが効いた候補 -> リランク関連度（rerank_scores_to_rel 済み）
       - それ以外               -> 密の関連度と語彙(BM25)関連度の大きい方
     これにより「足切り・表示%・並び順」がすべて同じ尺度になる。
     """
     if c.get("rr") is not None:
-        return _sigmoid(c["rr"])
+        return c["rr"]
     rel = relevance(c["cos"])
     if c.get("bm") is not None:
         rel = max(rel, _lex_rel(c["bm"]))
@@ -482,15 +502,16 @@ def _rank_cases(ix, query, use_ann: bool = True):
 
     cand = [int(p) for p in np.argsort(-fused)]
 
-    # クロスエンコーダ・リランク（融合上位のみにスコアを付与）
+    # クロスエンコーダ・リランク（融合上位のみに関連度を付与）
     rr_by_pos = {}
     if rerank.available() and cand:
         topN = cand[:RERANK_TOP]
         texts = [ix["chunk_text"][int(best[pos])] for pos in topN]
         scores = rerank.rerank(query, texts)
         if scores is not None:
-            for pos, sc in zip(topN, scores):
-                rr_by_pos[pos] = float(sc)
+            rels = rerank_scores_to_rel(scores)  # 二重sigmoidを防ぐバッチ判定
+            for pos, rr in zip(topN, rels):
+                rr_by_pos[pos] = rr
 
     return [
         {"pos": pos, "cos": float(case_cos[pos]), "best": int(best[pos]),
