@@ -125,7 +125,7 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
 
 def ingest_file(conn, path: str, ocr_ok: bool, industry: str | None = None) -> bool:
     title = os.path.splitext(os.path.basename(path))[0]
-    source = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__)))
+    source = search.rel_source(path)
     try:
         text = extract_text(path, ocr_ok).strip()
     except Exception as e:  # noqa: BLE001
@@ -183,10 +183,7 @@ def main(argv):
 
     # 引数なし（data/全体の取り込み）時は、消えたファイルのDB行を掃除する
     if not argv:
-        on_disk = {
-            os.path.relpath(p, os.path.dirname(os.path.abspath(__file__)))
-            for p in iter_targets([])
-        }
+        on_disk = {search.rel_source(p) for p in iter_targets([])}
         stale = search.all_sources(conn) - on_disk
         if stale:
             search.delete_sources(conn, stale)

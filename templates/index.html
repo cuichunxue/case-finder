@@ -220,7 +220,7 @@ async function runAI(q, industry, loose){
 
 function finalizeAnswer(box, answer, cites, model){
   const c = (cites || []).map(x =>
-    `[${x.n}] <a href="/${esc(x.source)}" target="_blank">${esc(x.title)}</a>`).join("　");
+    `[${x.n}] <a href="/data/${encodeURIComponent(x.source)}" target="_blank">${esc(x.title)}</a>`).join("　");
   box.innerHTML = `<h4>AIによる要約（Azure・${esc(model||"")}）</h4>
     <div class="body">${highlight(answer, [])}</div>
     <div class="cites">出典　${c}</div>
@@ -252,7 +252,7 @@ function showAnswer(a){
     return;
   }
   const cites = (a.citations || []).map(c =>
-    `[${c.n}] <a href="/${esc(c.source)}" target="_blank">${esc(c.title)}</a>`).join("　");
+    `[${c.n}] <a href="/data/${encodeURIComponent(c.source)}" target="_blank">${esc(c.title)}</a>`).join("　");
   box.innerHTML = `<h4>AIによる要約（Azure・${esc(a.model||"")}）</h4>
     <div class="body">${highlight(a.answer, [])}</div>
     <div class="cites">出典　${cites}</div>
@@ -404,7 +404,7 @@ function renderDetail(c, nodes){
           <div class="row-val">${esc(c.excerpt)}</div>
         </div>` : ""}
       <div style="margin-bottom:14px;">
-        <a class="open-link" href="/${esc(c.source)}" target="_blank">元ファイルを開く（${esc(c.source)}）↗</a>
+        <a class="open-link" href="/data/${encodeURIComponent(c.source)}" target="_blank">元ファイルを開く（${esc(c.source)}）↗</a>
       </div>
       <div class="fb">
         <button class="fbbtn" data-vote="up" title="この事例は役に立った">👍 役に立った</button>

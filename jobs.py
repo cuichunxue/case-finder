@@ -20,10 +20,25 @@ _q: "queue.Queue[tuple[str, list[str], str]]" = queue.Queue()
 _lock = threading.Lock()
 _worker_started = False
 
+# 保持するジョブ履歴の上限（長期稼働でのメモリ膨張を防ぐ）
+MAX_JOBS = int(os.environ.get("CASE_FINDER_MAX_JOBS", "200"))
+
+
+def _prune_locked():
+    """完了済みの古いジョブから削除する（_lock 保持中に呼ぶこと）。"""
+    if len(_jobs) <= MAX_JOBS:
+        return
+    finished = [(j.get("created", 0.0), k) for k, j in _jobs.items()
+                if j.get("status") in ("done", "error")]
+    finished.sort()
+    for _, k in finished[: len(_jobs) - MAX_JOBS]:
+        _jobs.pop(k, None)
+
 
 def _set(jid: str, **kw):
     with _lock:
         _jobs.setdefault(jid, {}).update(kw)
+        _prune_locked()
 
 
 def get(jid: str):

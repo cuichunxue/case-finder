@@ -720,3 +720,115 @@ def test_upload_async_job(env, monkeypatch):
     job = jobs.get(r["job_id"])
     assert job and job["status"] == "done", job
     assert "u.txt" in job["added"]
+
+
+# ══════════════════════════════════════════════════════════════
+# 侵入・異常系テスト（実際に攻撃/異常入力を投げて検証したもの）
+# ══════════════════════════════════════════════════════════════
+
+def test_upload_path_traversal_blocked(env):
+    """悪意あるファイル名で DATA_DIR の外に書けないこと。"""
+    import app
+
+    c = app.app.test_client()
+    for evil in ["../../etc/passwd.txt", "..\\..\\win.txt", "/etc/passwd.txt", "a/../../b.txt"]:
+        c.post("/api/upload", data={"files": (io.BytesIO(b"x"), evil)},
+               content_type="multipart/form-data")
+    outside = env.tmp / "etc"
+    assert not outside.exists()
+    # 書かれたものは必ず data/ 直下
+    for p in env.datadir.iterdir():
+        assert p.parent == env.datadir
+
+
+def test_data_route_traversal_blocked(env):
+    import app
+
+    c = app.app.test_client()
+    for evil in ["../cases.db", "....//cases.db", "..%2f..%2fetc%2fpasswd"]:
+        r = c.get(f"/data/{evil}")
+        assert r.status_code in (400, 404, 308), f"{evil} -> {r.status_code}"
+
+
+def test_bad_params_return_400_not_500(env):
+    """不正な数値パラメータで 500 にならないこと。"""
+    import app
+
+    c = app.app.test_client()
+    for url in ["/api/search?q=x&k=abc", "/api/map?k=abc", "/api/search?q=x&k=-5",
+                "/api/search?q=x&k=999999", "/api/map?k=0"]:
+        r = c.get(url)
+        assert r.status_code != 500, f"{url} -> 500"
+
+
+def test_huge_case_id_no_overflow(env):
+    """SQLite の INTEGER 範囲を超える case_id で 500 にならないこと。"""
+    import app
+
+    c = app.app.test_client()
+    r = c.post("/api/feedback", data={"q": "x", "vote": "up", "case_id": "9" * 100})
+    assert r.status_code != 500
+
+
+def test_long_filename_truncated(env):
+    """超長ファイル名でも OSError にならず保存できること。"""
+    import app
+
+    c = app.app.test_client()
+    r = c.post("/api/upload", data={"files": (io.BytesIO(b"x"), "a" * 300 + ".pdf")},
+               content_type="multipart/form-data")
+    assert r.status_code != 500
+    for p in env.datadir.iterdir():
+        assert len(p.name.encode()) <= 255
+
+
+def test_rate_limit_table_bounded(env, monkeypatch):
+    """レート制限テーブルが無制限に増えない（メモリリーク防止）。"""
+    import app
+
+    monkeypatch.setattr(app, "ANSWER_RATE", 10000)
+    monkeypatch.setattr(app, "RATE_MAX_KEYS", 100)
+    app._rate_hits.clear()
+    for i in range(500):
+        app._rate_limited(f"10.0.{i // 256}.{i % 256}")
+    assert len(app._rate_hits) <= 200, f"{len(app._rate_hits)}件まで膨張"
+    app._rate_hits.clear()
+
+
+def test_jobs_table_bounded(env, monkeypatch):
+    """ジョブ履歴が無制限に増えない（メモリリーク防止）。"""
+    import jobs
+
+    monkeypatch.setenv("CASE_FINDER_SYNC_JOBS", "1")
+    monkeypatch.setattr(jobs, "MAX_JOBS", 20)
+    jobs._jobs.clear()
+    for i in range(60):
+        p = env.datadir / f"j{i}.txt"
+        p.write_text("課題: x")
+        jobs.submit([str(p)], "")
+    assert len(jobs._jobs) <= 25, f"{len(jobs._jobs)}件まで膨張"
+    jobs._jobs.clear()
+
+
+def test_source_link_resolves(env, monkeypatch):
+    """DATA_DIR を移しても『元ファイルを開く』リンクが 200 で開けること。"""
+    from urllib.parse import quote
+
+    import app
+
+    monkeypatch.setenv("CASE_FINDER_SYNC_JOBS", "1")
+    c = app.app.test_client()
+    c.post("/api/upload",
+           data={"files": (io.BytesIO("課題: 離職".encode()), "若手の離職&対策 <v2>.txt")},
+           content_type="multipart/form-data")
+    # 取り込みと同じスタブ埋め込みのまま検索する（次元を揃える）
+    monkeypatch.setattr(env.search, "MIN_REL", 0.0)
+    monkeypatch.setattr(env.search, "WEAK_REL", 0.0)
+    monkeypatch.setattr(env.search, "REL_FLOOR", 0.0)
+    monkeypatch.setattr(env.search, "REL_CEIL", 1.0)
+    env.search.invalidate_cache()
+    j = c.get("/api/search?q=離職").get_json()
+    assert j["nodes"], "検索結果が空"
+    src = j["nodes"][0]["source"]
+    assert not src.startswith(".."), f"source={src!r}"
+    assert c.get("/data/" + quote(src)).status_code == 200

@@ -326,6 +326,19 @@ def all_sources(conn):
     return {r["source"] for r in conn.execute("SELECT source FROM cases")}
 
 
+def rel_source(path: str) -> str:
+    """事例ファイルの識別子。DATA_DIR 起点の相対パスに統一する。
+
+    画面のリンク /data/<source> と一致させるため、DATA_DIR を環境変数で
+    別の場所に移しても壊れない形にする。
+    """
+    ap = os.path.abspath(path)
+    ad = os.path.abspath(DATA_DIR)
+    if ap.startswith(ad + os.sep):
+        return os.path.relpath(ap, ad).replace(os.sep, "/")
+    return os.path.basename(ap)
+
+
 # ──────────────────────────────────────────────────────────────
 # インメモリ・インデックス（チャンク行列＋BM25）
 # ──────────────────────────────────────────────────────────────

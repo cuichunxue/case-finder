@@ -105,6 +105,10 @@ _rate_hits: dict[str, list[float]] = {}
 _rate_lock = threading.Lock()
 
 
+# 追跡するクライアント数の上限（長期稼働でのメモリ膨張を防ぐ）
+RATE_MAX_KEYS = int(os.environ.get("CASE_FINDER_RATE_MAX_KEYS", "1000"))
+
+
 def _rate_limited(key: str) -> bool:
     if ANSWER_RATE <= 0:
         return False
@@ -113,6 +117,16 @@ def _rate_limited(key: str) -> bool:
         q = _rate_hits.setdefault(key, [])
         while q and now - q[0] > 60.0:
             q.pop(0)
+        # 期限切れのクライアントを掃除し、それでも多い場合は古い順に捨てる
+        if len(_rate_hits) > RATE_MAX_KEYS:
+            for k in [k for k, v in _rate_hits.items() if not v and k != key]:
+                del _rate_hits[k]
+            if len(_rate_hits) > RATE_MAX_KEYS:
+                for k in sorted(_rate_hits, key=lambda k: _rate_hits[k][-1] if _rate_hits[k] else 0)[
+                    : len(_rate_hits) - RATE_MAX_KEYS
+                ]:
+                    if k != key:
+                        del _rate_hits[k]
         if len(q) >= ANSWER_RATE:
             return True
         q.append(now)
@@ -179,11 +193,32 @@ def _unhandled(e):
 
 
 def _safe_filename(name: str) -> str:
-    """日本語ファイル名は保ちつつ、パス区切りや '..' を排除する。"""
+    """日本語ファイル名は保ちつつ、パス区切りや '..' を排除し、長さも制限する。"""
     name = os.path.basename(name or "").strip()
     if name in ("", ".", "..") or "/" in name or "\\" in name:
         return ""
-    return name
+    if "\x00" in name:
+        return ""
+    # ファイルシステム上限(255バイト)を超えないよう拡張子を保って切り詰める
+    stem, ext = os.path.splitext(name)
+    ext = ext[:16]
+    max_stem = 200 - len(ext.encode("utf-8"))
+    b = stem.encode("utf-8")
+    if len(b) > max_stem:
+        stem = b[:max_stem].decode("utf-8", errors="ignore")
+    return (stem + ext) or ""
+
+
+def _int_arg(src, key, default, lo, hi):
+    """数値パラメータを安全に取得する。不正値は 400 で返せるよう ValueError を投げる。"""
+    raw = src.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} は整数で指定してください")
+    return max(lo, min(hi, v))
 
 
 @app.route("/")
@@ -205,12 +240,12 @@ def healthz():
 def api_search():
     q = request.args.get("q", "").strip()
     industry = request.args.get("industry", "").strip()
-    top_k = int(request.args.get("k", 6))
     # loose=1 で「関連が弱い候補」も含める（足切りを WEAK_REL まで下げる）
     min_rel = search.WEAK_REL if request.args.get("loose") else None
     try:
+        top_k = _int_arg(request.args, "k", 6, 1, 50)
         return jsonify(search.search(q, top_k=top_k, industry=industry, min_rel=min_rel))
-    except Exception as e:  # noqa: BLE001  次元不一致など
+    except Exception as e:  # noqa: BLE001  不正パラメータ・次元不一致など
         return jsonify({"error": str(e)}), 400
 
 
@@ -222,10 +257,10 @@ def api_stats():
 @app.route("/api/map")
 def api_map():
     """事例コーパスのトピック地図（クラスタ＋キーワード＋2D配置＋エッジ）。"""
-    k = request.args.get("k")
     try:
+        k = _int_arg(request.args, "k", None, 1, 50)
         ix = search.get_index()
-        return jsonify(topics.build_map(ix, k=int(k) if k else None))
+        return jsonify(topics.build_map(ix, k=k))
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
 
@@ -239,13 +274,13 @@ def api_metrics():
 
 @app.route("/api/feedback", methods=["POST"])
 def api_feedback():
-    q = (request.form.get("q") or "").strip()
+    q = (request.form.get("q") or "").strip()[:1000]  # ログ肥大を防ぐ
     vote = request.form.get("vote", "")
-    case_id = request.form.get("case_id")
     if vote not in ("up", "down"):
         return jsonify({"error": "vote は up/down"}), 400
     try:
-        case_id = int(case_id) if case_id not in (None, "") else None
+        # SQLite の INTEGER 範囲を超える値は None 扱い（OverflowError を防ぐ）
+        case_id = _int_arg(request.form, "case_id", None, -(2 ** 63), 2 ** 63 - 1)
     except ValueError:
         case_id = None
     search.record_feedback(q, case_id, vote)
@@ -260,7 +295,7 @@ def api_answer():
     """
     q = request.args.get("q", "").strip()
     industry = request.args.get("industry", "").strip()
-    top_k = int(request.args.get("k", 6))  # 検索表示と同じ件数に統一
+    top_k = _int_arg(request.args, "k", 6, 1, 50)  # 検索表示と同じ件数に統一
     min_rel = search.WEAK_REL if request.args.get("loose") else None
     try:
         result = search.search(q, top_k=top_k, industry=industry, min_rel=min_rel)
@@ -335,7 +370,7 @@ def api_answer_stream():
     """SSEで「検索結果→要約トークン→出典」を逐次配信（Azure有効時）。"""
     q = request.args.get("q", "").strip()
     industry = request.args.get("industry", "").strip()
-    top_k = int(request.args.get("k", 6))
+    top_k = _int_arg(request.args, "k", 6, 1, 50)
     min_rel = search.WEAK_REL if request.args.get("loose") else None
     try:
         result = search.search(q, top_k=top_k, industry=industry, min_rel=min_rel)
