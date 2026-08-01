@@ -1,0 +1,297 @@
+# 事例ファインダー（ローカル意味検索サーバー）
+
+手元の事例（PPT / PDF）を、意味の近さで正確に探せるローカルアプリです。
+Connected Papers のように「あなたの問題」を中心にしたグラフで関連事例を表示します。
+**データは外部に送信しません。生成AI（LLM）は使いません。**
+意味理解は BERT 系エンコーダ、画像中心の資料は OCR で扱います（モデルは初回のみDL）。
+
+検索は **チャンク密検索 ＋ BM25ハイブリッド ＋ クロスエンコーダ・リランカー** の
+3段構成で、LLM-RAG 同等以上の精度を狙います（いずれも非生成・BERT系/語彙）。
+精度は `bench.py`（Recall@k / MRR / nDCG）で測定できます。
+
+さらに **Azure 生成AI（任意）** を有効にすると、検索上位を根拠にした
+**要約・示唆（出典つき）**、クエリ拡張、Azure 埋め込みを上乗せできます。
+未設定なら自動的に純ローカルへフォールバックします。
+
+## できること
+- `data/` に置いた PPT / PDF を読み取り、意味ベクトル化して登録
+- **画面からアップロード**しても取り込める（CLI不要・その場で検索対象に）
+- 画像中心のスライド・スキャンPDFは **OCR（既定 EasyOCR / 商用可）** で文字化
+- **BERT 埋め込み**で各事例を「課題 / 施策 / 成果」に自動仕分け＋**業種を自動推定**（LLM不使用）
+- 「困っていること」を文章で入力すると、関連度の高い事例をランキング表示（**業種で絞り込み可**）
+- 関連度は閾値で足切りし、無関係な事例は出さない（**該当なしも正しく表示**）
+- 事例同士のつながりをグラフで可視化／結果から元ファイルを開ける
+- ローカルサーバーなので、同じネットワークの人みんなで使える
+- 任意の **Basic認証**と**本番サーバー（waitress）**に対応
+- 任意で **Azure 生成AI** を選択し、検索上位を根拠にした**要約・示唆（出典つき・逐次表示）**を生成
+- 結果への 👍/👎 フィードバック記録、稼働メトリクス（`/api/metrics`）
+- **トピック地図**：事例全体を自動でクラスタリングし、キーワード＋2Dマップで俯瞰（「🗺 マップ」）
+
+## セットアップ（ローカル / venv）
+```bash
+./setup.sh                      # venv作成＋依存インストール
+source .venv/bin/activate
+# data/ に事例(PPT/PDF)を置いてから
+python ingest.py                # 初回はモデルを自動DL
+./run.sh                        # = python app.py（http://localhost:5000）
+```
+手動で行う場合:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+保存先を変えたいときは `CASE_FINDER_DB`（DBファイル）/ `CASE_FINDER_DATA_DIR`（事例フォルダ）
+を環境変数で指定できます。
+OCR の既定エンジンは **EasyOCR**（Apache-2.0・商用利用可）です。`requirements.txt` に含まれ、
+日本語モデルは初回の取り込み時に自動ダウンロードされます。追加導入は不要です。
+
+OCR エンジンは環境変数で切り替えられます:
+```bash
+CASE_FINDER_OCR_ENGINE=easyocr    # 既定（高精度・pipのみ）
+CASE_FINDER_OCR_ENGINE=tesseract  # 軽量。別途 Tesseract 本体の導入が必要
+CASE_FINDER_OCR_ENGINE=auto       # EasyOCRがあれば優先、無ければTesseract
+```
+OCR エンジンが無くても、テキスト層のある PPT/PDF はそのまま取り込めます
+（OCR は自動で有効/無効を判定します）。
+
+## 使い方
+1. `data/` フォルダに事例の PPT / PDF を入れる
+2. 取り込み（初回はモデルを自動ダウンロード）
+   ```bash
+   python ingest.py
+   ```
+3. サーバー起動
+   ```bash
+   python app.py
+   ```
+4. ブラウザで `http://localhost:5000`
+   - 同じネットワークの人は `http://<このPCのIP>:5000` でアクセス
+
+> **ファイル名のルール（重要）**: ファイル名がそのまま検索結果のタイトルになります。
+> 「20240401_提案_final2.pptx」ではなく **「若手の早期離職をメンター制度で抑制.pptx」** のように
+> **事例の内容が分かる名前**にしてから取り込んでください。
+
+事例の追加は2通り:
+- **画面から**：上部の「＋ 事例を追加」でファイルを選び「取り込む」（業種は任意指定/自動推定）。
+  取り込みは**バックグラウンドで実行**され、進捗（◯/◯件）が表示されます。
+- **CLIから**：`data/` に置いて `python ingest.py` を再実行（同名は上書き、`data/` から消した事例はDBからも自動削除）
+
+検索で「関連の高い事例が無い」場合は、**「弱い候補も表示」**から関連度のしきい値を下げて再検索できます。
+
+## 運用（みんなで使う）
+```bash
+# 本番サーバー（waitress）で起動。社外秘ならBasic認証を有効化:
+CASE_FINDER_PASSWORD=ひみつ python app.py            # 読み書きとも要認証
+CASE_FINDER_WRITE_PASSWORD=ひみつ python app.py      # 読みは自由・取り込みのみ要認証
+#   ユーザー名の既定は "user"（CASE_FINDER_USER で変更可）
+```
+- どちらも未設定だと**認証なしで公開**されます（同一LAN内の誰でも閲覧・取り込み可）。社外秘では設定を推奨。
+- `waitress` が入っていれば自動で本番サーバー、無ければ警告付きで開発サーバーになります。
+- 起動時に埋め込みモデル＋リランカーを先読み（warmup）するため、最初の検索の待ちが減ります。
+
+### 組み込みの安全対策
+実際に攻撃・異常入力を投げて検証し、回帰テストに固定しています（`tests/`）。
+- **パストラバーサル対策**：アップロード名は basename 化＋長さ制限、`/data` は配信ディレクトリ外に出ない
+- Basic認証は**定数時間比較**（タイミング攻撃対策）。空ユーザー/空パスワード/前方一致はすべて拒否
+- 全レスポンスにセキュリティヘッダ（`nosniff` / `X-Frame-Options: DENY` / `Referrer-Policy`）
+- 未処理例外は**内部詳細を漏らさない** JSON 500（詳細はサーバーログのみ）。
+  不正な数値パラメータは 400（500にしない）
+- AI要約（Azure呼び出し）は**IP毎のレート制限**でコスト暴走を防止
+- **メモリ膨張の防止**：レート制限テーブルとジョブ履歴に上限（長期常駐でも増え続けない）
+- 画面表示は全て HTML エスケープ済み（悪意ある事例名・本文でもスクリプトは実行されない）
+
+### 安全な公開（TLS）
+Basic認証はHTTPでは**平文**です。社外秘を扱うなら次のいずれかを推奨:
+- **リバースプロキシでTLS**（例 Caddy 1行）: `case.example.lan { reverse_proxy 127.0.0.1:5000 }`
+  （アプリは `CASE_FINDER_HOST=127.0.0.1` でローカル限定にする）
+- **SSHトンネル**: `ssh -L 5000:127.0.0.1:5000 サーバ` 経由で各自アクセス
+
+### 監視・自動再起動
+- ヘルスチェック（**認証不要**）: `GET /healthz` → `{"status":"ok","cases":N}`
+- 稼働指標: `GET /api/metrics`（検索数・レイテンシ・キャッシュヒット率・Azureトークン等）
+- systemd で常駐＋自動再起動: `deploy/case-finder.service` を参照
+  （`Restart=always`、外形監視は `/healthz` を叩く）
+
+### GPU で高速化
+GPUがあれば自動利用されます（`CASE_FINDER_DEVICE=auto` 既定。`cpu`/`cuda`/`mps` を明示も可）。
+埋め込み・リランカー・OCR が数倍速くなります（要 CUDA 版 torch）。
+
+### バックアップ
+状態は `cases.db` のみ（埋め込みは `data/` から再生成可、👍/👎は再生成不可）。
+`cases.db` と `data/` を定期バックアップしてください（WAL有効のため `cases.db-wal/-shm` も含めるか、停止中にコピー）。
+
+## 導入前チェックリスト（30〜60分・正確に使うために必須級）
+既定のしきい値は汎用の目安であり、**校正せずに使うと関連度%が実態とズレる**ことがあります。
+本番公開の前に次を実施してください:
+
+1. **実データで試す**: 実際の事例10〜20件を `python ingest.py` で取り込み、
+   代表的な質問を5〜10個投げて結果を目視する（実モデルの初回通し確認）。
+2. **リランカーの関連度分布を確認**: 上位の関連度%が全て50〜73%に固まっていたら
+   スコア変換の不整合の可能性。`CASE_FINDER_RERANK=off` と比較し、
+   必要なら `CASE_FINDER_RERANK_ACTIVATION=none|sigmoid` を明示する
+   （既定 `auto` は出力が0-1なら確率とみなし二重sigmoidを防ぐ）。
+3. **しきい値を校正**: `eval.json` を10クエリ分作って `python calibrate.py`。
+   推奨値（`CASE_FINDER_MIN_REL` 等）を環境変数に設定する。
+4. **自動抽出を目視**: 詳細画面の「課題/施策/成果（自動抽出・参考）」を数件確認。
+   誤りが目立つ資料は「課題:」「施策:」「成果:」の見出しを付けると確実になる。
+5. **ファイル名ルールの周知**: ファイル名＝事例名（上記）。
+
+## しきい値の校正（任意・精度の作り込み）
+`MIN_SCORE` などの既定値は汎用の目安です。あなたの事例に合わせるには:
+```bash
+python ingest.py                       # 事例を登録
+cp eval.sample.json eval.json          # 評価データを用意（query と正解事例）
+python calibrate.py                    # 閾値スイープとスコア分布から推奨値を表示
+```
+出力された `CASE_FINDER_MIN_SCORE` 等を環境変数に設定して再起動すると反映されます。
+
+### 主な環境変数
+関連度は密検索・BM25・リランカーの判断を **0〜1 の統一スコア(rel)** にまとめ、
+足切り・表示%・並び順をすべて rel で一貫させています（語彙ヒットやリランク上位が
+密の閾値で消える問題を解消）。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `CASE_FINDER_MIN_REL` | `0.40` | これ未満は検索結果から除外（統一関連度） |
+| `CASE_FINDER_WEAK_REL` | `0.15` | 「弱い候補も表示」で使う下限（統一関連度） |
+| `CASE_FINDER_REL_FLOOR` / `_REL_CEIL` | `WEAK_FLOOR` / `0.92` | 密コサイン→関連度の伸縮範囲 |
+| `CASE_FINDER_BM25_SAT` | `6.0` | BM25生スコアを0-1関連度に飽和変換する係数 |
+| `CASE_FINDER_DEDUP` / `_DEDUP_THRESHOLD` | `on` / `0.98` | 近重複事例を結果から集約 |
+| `CASE_FINDER_OCR_MIN_CONF` | `0.4` | この信頼度未満のOCR結果を除外 |
+| `CASE_FINDER_TOKENIZER` | `char` | `char`/`sudachi`/`auto`（語彙一致用） |
+| `CASE_FINDER_CHUNK_SIZE` / `_CHUNK_OVERLAP` | `400` / `60` | チャンク長／重なり(文字) |
+| `CASE_FINDER_RERANK` / `_RERANKER` | `auto` / 日本語CE | リランカーの有効化とモデル |
+| `CASE_FINDER_RERANK_ACTIVATION` | `auto` | リランカー出力の解釈（`auto`/`sigmoid`/`none`） |
+| `CASE_FINDER_HYBRID` | `auto` | BM25ハイブリッドの有効化（`off`で密のみ） |
+| `CASE_FINDER_ANN` / `_ANN_MIN` / `_ANN_K` | `auto` / `2000` / `200` | 大規模時にhnswlibで密検索を近似高速化 |
+| `CASE_FINDER_CACHE_SIZE` / `_CACHE_TTL` | `256` / `300` | 結果・要約キャッシュのサイズ/秒 |
+| `CASE_FINDER_OCR_ENGINE` | `easyocr` | `easyocr` / `tesseract` / `auto` |
+| `CASE_FINDER_INDUSTRIES` | （内蔵リスト） | 業種候補をカンマ区切りで上書き |
+| `CASE_FINDER_PASSWORD` | （なし） | 全体のBasic認証パスワード |
+| `CASE_FINDER_WRITE_PASSWORD` | （なし） | 取り込みのみ要認証にする場合 |
+| `CASE_FINDER_DEVICE` | `auto` | `auto`/`cpu`/`cuda`/`mps`（GPU利用） |
+| `CASE_FINDER_HOST` / `PORT` | `0.0.0.0` / `5000` | 待ち受けアドレス/ポート |
+| `CASE_FINDER_DB_TIMEOUT` | `5000` | SQLiteロック待ち(ms) |
+| `CASE_FINDER_LOG_FILE` | （なし） | 設定するとファイル出力＋ローテーション |
+| `CASE_FINDER_ANSWER_RATE` | `10` | AI要約のIP毎レート制限(回/分)。0で無効 |
+| `CASE_FINDER_RATE_MAX_KEYS` | `1000` | レート制限で追跡するクライアント数の上限 |
+| `CASE_FINDER_MAX_JOBS` | `200` | 保持する取り込みジョブ履歴の上限 |
+
+## Azure 生成AI（任意の選択機能）
+有効にすると、検索の上に生成AIの能力を上乗せできます。**未設定なら一切使われず、
+完全ローカルのまま動作します。**
+
+- **RAG要約**：検索上位の事例だけを根拠に、課題への示唆を日本語で生成（出典 [n] つき）
+- **クエリ拡張(HyDE)**（任意）：仮想事例を生成して密検索の再現率を底上げ
+- **Azure 埋め込み**（任意）：ローカル埋め込みの代わりに使用（取り込みと検索で揃える）
+
+> ⚠ **プライバシー注意**：有効化すると、クエリや上位事例の本文が Azure に送信されます。
+> 社外秘データを扱う場合は、契約・データ保持ポリシーを確認のうえご利用ください。
+
+```bash
+pip install openai
+export CASE_FINDER_AZURE=on
+export AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+export AZURE_OPENAI_API_KEY=<key>
+export AZURE_OPENAI_CHAT_DEPLOYMENT=<chatデプロイ名>       # 要約・拡張
+export AZURE_OPENAI_EMBED_DEPLOYMENT=<embeddingデプロイ名> # 任意
+# 任意: クエリ拡張 / 埋め込みをAzureに
+export CASE_FINDER_AZURE_EXPAND=on
+export CASE_FINDER_EMBED_BACKEND=azure   # 使う場合は取り込みも同設定で再 ingest
+python app.py
+```
+画面では、Azureが有効なときだけ「🧠 AIで要約（Azure）」トグルが現れます。
+API は `GET /api/answer?q=...`。**検索結果(nodes/edges/hidden)も同梱して返す**ため、
+AI要約ON時もフロントは1リクエストで完結します（二重検索なし）。Azure無効時は `answer:null`。
+
+`/api/answer` は外部送信・課金を伴うため、**書き込みと同じ認証ゲート**で保護されます
+（`CASE_FINDER_PASSWORD` か `CASE_FINDER_WRITE_PASSWORD` 設定時は要認証）。
+Azure呼び出しには `CASE_FINDER_AZURE_TIMEOUT`（既定30秒）/ `CASE_FINDER_AZURE_RETRIES`（既定1）が効きます。
+埋め込みバックエンドを切り替えた場合は、次元が変わるため必ず `python ingest.py` で再取り込みしてください
+（不一致は検知してエラー表示します）。
+
+## テスト / CI
+```bash
+pip install -r requirements-dev.txt   # もしくは: pip install pytest
+pytest -q          # スタブ埋め込みで配線を検証（実モデル/OCR/Azure不要）
+```
+GitHub Actions（`.github/workflows/ci.yml`）で push/PR 時に最小依存で自動実行します。
+
+ログをファイルに残す場合（運用）:
+```bash
+CASE_FINDER_LOG_FILE=/var/log/case-finder.log python app.py   # 自動ローテーション
+```
+
+## 仕組み（生成AI不使用）
+- 抽出: `PyMuPDF`（PDF）/ `python-pptx`（PPT）
+- OCR: 既定は `EasyOCR`（Apache-2.0・商用可）、代替で `Tesseract`
+- チャンク化: 本文を節単位に分割して各チャンクを埋め込み（長文・複数トピック対策）
+- 意味ベクトル: `sentence-transformers` の `intfloat/multilingual-e5-small`
+  （XLM-RoBERTa ＝ BERT 系エンコーダ。生成LLMではありません）
+- **ハイブリッド検索**: 密検索（コサイン）＋ BM25（語彙一致）を RRF で融合
+  → 固有名詞・型番・数値の取りこぼしを抑制
+- **リランカー**: 上位候補を日本語クロスエンコーダで並べ替え（精度の最大レバー）
+- **抜粋根拠**: ヒットの該当チャンクとクエリ語のハイライトで「なぜ近いか」を提示（生成なし）
+- 課題/施策/成果の仕分け・業種推定: 見出し検出 ＋ BERT埋め込みのゼロショット分類
+- 関連度: 生コサインを閾値で足切りし、表示用に 0〜100% へ伸縮（無関係を出さない）
+- 高速化: 起動時にインデックスをメモリ保持＋モデルwarmup、結果/要約のTTLキャッシュ、
+  大規模時は hnswlib による近似最近傍(ANN)。取り込み時に自動更新
+- 保存: SQLite（`cases.db`、事例＋チャンク）。再起動しても再計算不要
+
+### 精度を上げる（LLM同等以上を狙う設定）
+既定は軽量モデルです。精度重視なら、より強い日本語埋め込み＋リランカーに差し替え:
+```bash
+# 例: 高精度な日本語埋め込み + 日本語リランカー（初回DLあり）
+CASE_FINDER_MODEL=cl-nagoya/ruri-large \
+CASE_FINDER_RERANKER=hotchpotch/japanese-reranker-cross-encoder-large-v1 \
+python ingest.py && \
+CASE_FINDER_MODEL=cl-nagoya/ruri-large python app.py
+```
+切替に関わる環境変数: `CASE_FINDER_MODEL` / `CASE_FINDER_RERANK`(auto|off) /
+`CASE_FINDER_RERANKER` / `CASE_FINDER_HYBRID`(auto|off) / `CASE_FINDER_CHUNK_SIZE`。
+
+### 精度の測定（A/B・信頼区間つき）
+`eval.json` は二値（`"relevant": ["断片", ...]`）と段階的（`"relevant": {"断片": 2}`）の両対応。
+```bash
+python bench.py                          # Recall@k / MRR / nDCG＋95%CI
+CASE_FINDER_HYBRID=off python bench.py   # 密のみと比較
+CASE_FINDER_RERANK=off python bench.py   # リランカー無しと比較
+```
+評価中は HyDE を自動オフ。実務では 50〜100 クエリの評価セットを推奨（CIが締まる）。
+
+### トピック地図（テキストマインドマップ）
+画面の「🗺 マップ」で、登録事例を**自動クラスタリング**し、各トピックの**特徴語(c-TF-IDF)**と
+**2D配置(PCA)**・つながり(kNN)で俯瞰できます（API: `GET /api/map`）。依存追加なし。
+日本語の特徴語をより読みやすくするには形態素解析の併用が有効:
+```bash
+pip install sudachipy sudachidict_core
+CASE_FINDER_TOKENIZER=sudachi python ingest.py   # 取り込みと検索で揃える
+```
+
+## 構成
+| ファイル | 役割 |
+|---|---|
+| `ingest.py` | PPT/PDF を読み取り（必要ならOCR）→ 仕分け → ベクトル化 → DB登録 |
+| `ocr.py` | 画像中心の資料を OCR で文字化（既定 EasyOCR / 代替 Tesseract） |
+| `extract.py` | BERT埋め込みで「課題/施策/成果」分類・業種推定 |
+| `search.py` | チャンク密検索＋BM25ハイブリッド＋リランク・抜粋根拠の中核 |
+| `rerank.py` | クロスエンコーダ・リランカー（未導入なら自動フォールバック） |
+| `azure_ai.py` | Azure OpenAI連携（任意）：RAG要約・クエリ拡張・Azure埋め込み |
+| `jobs.py` | 取り込みのバックグラウンド実行＋進捗＋モデルwarmup |
+| `calibrate.py` | 評価データから閾値を校正するツール |
+| `bench.py` | Recall@k / MRR / nDCG で検索精度を測定（A/B比較） |
+| `app.py` | Flask サーバー（API + 画面配信 + 認証 + メトリクス/ログ） |
+| `cache.py` / `metrics.py` / `device.py` | TTLキャッシュ / 稼働メトリクス / GPU解決 |
+| `topics.py` | トピック地図（k-meansクラスタ＋c-TF-IDFキーワード＋PCA配置） |
+| `bench.py` / `calibrate.py` | 評価（段階的関連度・nDCG・信頼区間）/ 閾値校正 |
+| `setup.sh` / `run.sh` | 導入（venv作成＋依存）・起動スクリプト |
+| `deploy/case-finder.service` | systemd ユニット例（常駐・自動再起動） |
+| `templates/index.html` | 画面（意味検索＋関係グラフ＋根拠ハイライト＋アップロード） |
+| `tests/` | スタブ埋め込みによるスモークテスト（12件） |
+| `data/` | 事例の PPT/PDF を置く場所 |
+| `cases.db` | 事例＋チャンク＋ベクトルの保存先（自動生成） |
+
+## 今後の案
+- PaddleOCR など他エンジンの追加
+- 1ファイルに複数事例があるデッキのスライド/章単位チャンク化
+- 画面からの事例の削除・一覧ブラウズ

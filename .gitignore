@@ -1,0 +1,13 @@
+# 生成物・依存
+cases.db
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 評価データ（利用者ごとの正解。サンプルのみコミット）
+eval.json
+
+# 取り込んだ事例ファイル（社内データはコミットしない）
+data/*
+!data/.gitkeep

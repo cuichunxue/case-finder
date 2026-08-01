@@ -1,0 +1,21 @@
+# 互換レンジで固定（メジャー更新の破壊的変更を回避）
+flask>=3.0,<4
+waitress>=3.0,<4
+numpy>=1.24,<3
+rank-bm25>=0.2.2,<0.3
+python-pptx>=0.6.23,<2
+PyMuPDF>=1.23,<2
+sentence-transformers>=2.6,<6
+# OCR（画像中心のPPT/PDF用）。既定エンジン = EasyOCR（Apache-2.0・商用利用可）
+# pip のみで導入でき、日本語モデルは初回実行時に自動DLされます。
+easyocr>=1.7,<2
+Pillow>=10.0,<12
+# 代替エンジン Tesseract を使う場合（CASE_FINDER_OCR_ENGINE=tesseract）:
+#   macOS : brew install tesseract tesseract-lang
+#   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-jpn
+#   pip   : pip install pytesseract
+# 大規模(数万件〜)で密検索を高速化する場合（任意・未導入なら総当たり）: pip install hnswlib
+# hnswlib>=0.8
+# 開発・テスト用（任意）: pip install pytest
+# Azure 生成AI（任意の選択機能）。有効化する場合のみ: pip install openai
+# openai>=1.30

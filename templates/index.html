@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>事例ファインダー</title>
+<style>
+  :root{
+    --bg:#0E1116; --panel:#161B22; --line:#2A323D; --ink:#E8EDF2;
+    --sub:#8B96A5; --accent:#4DD6C1; --accent2:#F2B441; --node:#3A4757;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--ink);
+    font-family:'Inter',system-ui,-apple-system,'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif;
+    padding:28px 20px 60px;
+  }
+  .wrap{max-width:1080px; margin:0 auto;}
+  .head{display:flex; align-items:baseline; gap:12px; margin-bottom:4px; flex-wrap:wrap;}
+  h1{font-size:26px; font-weight:700; margin:0; letter-spacing:-0.01em;}
+  .tag-accent{color:var(--accent); font-size:13px; font-weight:600;}
+  .lead{color:var(--sub); font-size:14px; margin:0 0 22px;}
+  .searchbar{display:flex; gap:10px; margin-bottom:8px; flex-wrap:wrap;}
+  input[type=text], input#q{
+    flex:1; min-width:220px; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:13px 15px; color:var(--ink); font-size:15px; outline:none;
+  }
+  input::placeholder{color:var(--sub);}
+  select{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:0 12px; color:var(--ink); font-size:14px; outline:none; cursor:pointer;
+  }
+  button.go{
+    background:var(--accent); color:#06231F; border:none; border-radius:10px;
+    padding:0 22px; font-weight:700; font-size:15px; cursor:pointer;
+  }
+  .meta{color:var(--sub); font-size:12px; margin:6px 2px 8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+  .linkbtn{background:none; border:none; color:var(--accent); cursor:pointer; font-size:12px; padding:0;}
+  .uploader{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px; margin:0 0 22px; display:none; gap:10px; flex-wrap:wrap; align-items:center;}
+  .uploader.open{display:flex;}
+  .uploader .hint{color:var(--sub); font-size:11.5px; flex-basis:100%;}
+  .uploader input[type=file]{color:var(--sub); font-size:13px;}
+  .upstatus{color:var(--sub); font-size:12px; flex-basis:100%;}
+  .layout{display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:20px;}
+  @media (max-width:760px){ .layout{grid-template-columns:1fr;} }
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px;}
+  .graph-card{padding:8px;}
+  .graph-hint{color:var(--sub); font-size:11.5px; padding:2px 10px 8px;}
+  .list{display:flex; flex-direction:column; gap:10px;}
+  .item{
+    text-align:left; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:13px 15px; cursor:pointer; color:var(--ink); width:100%;
+  }
+  .item:hover{border-color:var(--accent);}
+  .item-top{display:flex; justify-content:space-between; align-items:center; gap:8px;}
+  .item-title{font-weight:600; font-size:14.5px;}
+  .item-sub{color:var(--sub); font-size:12.5px; margin-top:4px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+  .match{flex-shrink:0; font-size:11.5px; font-weight:700; color:var(--accent);
+    background:#4DD6C122; border-radius:20px; padding:2px 9px; white-space:nowrap;}
+  .empty{background:var(--panel); border:1px dashed var(--line); border-radius:12px;
+    padding:40px; text-align:center; color:var(--sub);}
+  .gnode{cursor:pointer; transition:opacity .15s;}
+  .gnode:hover{opacity:.85;}
+  .detail h3{margin:0; font-size:17px; font-weight:700;}
+  .detail{padding:18px;}
+  .back{background:none; border:none; color:var(--accent); cursor:pointer; font-size:13px;
+    padding:0; margin-bottom:12px;}
+  .row-label{color:var(--sub); font-size:11.5px; margin-bottom:3px;}
+  .row-val{font-size:14px; line-height:1.6; white-space:pre-wrap;}
+  .open-link{color:var(--accent2); font-size:13px; text-decoration:none;}
+  .evidence{background:#0E1116; border:1px solid var(--line); border-radius:8px;
+    padding:10px 12px; font-size:13px; line-height:1.7; color:var(--ink); white-space:pre-wrap;}
+  .evidence mark{background:#F2B44133; color:var(--accent2); padding:0 1px; border-radius:3px;}
+  .ailabel{display:flex; align-items:center; gap:5px; font-size:12px; color:var(--accent); cursor:pointer;}
+  .answer{background:linear-gradient(180deg,#15201e,#161B22); border:1px solid #2f4b45;
+    border-radius:14px; padding:16px 18px; margin-bottom:16px;}
+  .answer h4{margin:0 0 8px; font-size:13px; color:var(--accent); font-weight:700;}
+  .answer .body{font-size:14px; line-height:1.75; white-space:pre-wrap;}
+  .answer .cites{margin-top:10px; font-size:12px; color:var(--sub);}
+  .answer .cites a{color:var(--accent2); text-decoration:none;}
+  .answer .warn{margin-top:8px; font-size:11px; color:var(--sub);}
+  .fb{margin-top:8px; display:flex; gap:8px;}
+  .fbbtn{background:none; border:1px solid var(--line); border-radius:6px; cursor:pointer;
+    font-size:12px; padding:1px 7px; color:var(--ink);}
+  .fbbtn:hover{border-color:var(--accent);}
+  .cluster{border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px;}
+  .cluster .ctitle{font-weight:600; font-size:13px; margin-bottom:5px;}
+  .chip{display:inline-block; font-size:11.5px; border:1px solid var(--line); border-radius:20px;
+    padding:1px 9px; margin:2px 4px 2px 0; cursor:pointer; color:var(--ink);}
+  .chip:hover{border-color:var(--accent);}
+  .dot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle;}
+  @media (prefers-reduced-motion: reduce){ *{animation:none!important; transition:none!important;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>事例ファインダー</h1>
+    <span class="tag-accent">意味検索 × 関係グラフ（ローカル）</span>
+  </div>
+  <p class="lead">困っている問題を入力すると、意味の近い事例を自動で並べ、事例同士のつながりを図で表示します。</p>
+
+  <div class="searchbar">
+    <input id="q" placeholder="例：問い合わせ対応がベテラン頼みでばらつく" />
+    <select id="industry"><option value="">業種：すべて</option></select>
+    <button class="go" id="go">探す</button>
+  </div>
+  <div class="meta">
+    <span id="metatext"></span>
+    <label class="ailabel" id="aiWrap" style="display:none">
+      <input type="checkbox" id="aiToggle" /> 🧠 AIで要約（Azure）
+    </label>
+    <button class="linkbtn" id="showMap">🗺 マップ</button>
+    <button class="linkbtn" id="toggleUpload">＋ 事例を追加</button>
+  </div>
+
+  <div class="uploader" id="uploader">
+    <input type="file" id="files" multiple accept=".pdf,.pptx,.ppt,.txt,.md" />
+    <select id="upIndustry"><option value="">業種：自動推定</option></select>
+    <button class="go" id="uploadBtn">取り込む</button>
+    <div class="hint">PPT / PDF を選んで取り込むと、その場で意味検索の対象になります（初回はOCR/モデルのDLで時間がかかる場合があります）。</div>
+    <div class="upstatus" id="upstatus"></div>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<script>
+const PALETTE = {accent:"#4DD6C1", accent2:"#F2B441", node:"#3A4757", sub:"#8B96A5", center:"#4DD6C1"};
+const $ = (s) => document.querySelector(s);
+let lastData = null;
+let topK = 6;          // 「さらに表示」で拡張される表示件数
+let lastLoose = false; // 直前の検索が「弱い候補も表示」だったか
+// 自動抽出の欄であることを明示（誤情報リスクの注意喚起）
+const AUTO_TAG = ` <span style="color:var(--sub);font-weight:400">（自動抽出・参考）</span>`;
+
+function fillIndustries(list){
+  const cur = $("#industry").value;
+  $("#industry").innerHTML = `<option value="">業種：すべて</option>` +
+    list.map(i => `<option value="${esc(i)}">${esc(i)}</option>`).join("");
+  $("#industry").value = cur;
+  $("#upIndustry").innerHTML = `<option value="">業種：自動推定</option>` +
+    list.map(i => `<option value="${esc(i)}">${esc(i)}</option>`).join("");
+}
+
+async function loadStats(){
+  try{
+    const s = await (await fetch("/api/stats")).json();
+    const modes = [s.hybrid ? "ハイブリッド" : "密のみ", s.reranker ? "リランカー有" : "リランカー無"];
+    if(s.device && s.device !== "cpu") modes.push("GPU:" + s.device);
+    if(s.azure && s.azure.synth) modes.push("Azure要約可");
+    $("#metatext").textContent = `登録事例 ${s.count} 件 ・ ${s.model} ・ ${modes.join(" / ")}`;
+    $("#aiWrap").style.display = (s.azure && s.azure.synth) ? "flex" : "none";
+    fillIndustries(s.industries || []);
+  }catch(e){ /* noop */ }
+}
+
+function newSearch(){ topK = 6; run(false); }
+
+async function run(loose){
+  const q = $("#q").value.trim();
+  if(!q) return;
+  lastLoose = !!loose;
+  const industry = $("#industry").value;
+  const useAI = $("#aiToggle") && $("#aiToggle").checked;
+  $("#result").innerHTML = `<div class="empty">${useAI ? "検索＋AI要約中…" : "検索中…"}</div>`;
+  if(useAI){ return runAI(q, industry, loose); }
+  try{
+    const url = "/api/search?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
+    const data = await (await fetch(url)).json();
+    if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
+    lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
+    render(lastData, null);
+  }catch(e){
+    $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}（モデルの初回DL中・未準備の可能性）</div>`;
+  }
+}
+
+// AI ON: SSEで検索結果→要約を逐次表示（単一リクエスト）。失敗時は非ストリームへ。
+async function runAI(q, industry, loose){
+  const url = "/api/answer_stream?q=" + encodeURIComponent(q)
+    + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
+  const ensureBox = () => {
+    let b = document.getElementById("answerBox");
+    if(!b){ b = document.createElement("div"); b.id = "answerBox"; b.className = "answer"; $("#result").prepend(b); }
+    return b;
+  };
+  try{
+    const resp = await fetch(url);
+    if(!resp.ok || !resp.body) return runAIFallback(q, industry, loose);
+    const reader = resp.body.getReader(); const dec = new TextDecoder();
+    let buf = "", answer = "", cites = null;
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream: true});
+      let i;
+      while((i = buf.indexOf("\n\n")) >= 0){
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if(!line.startsWith("data:")) continue;
+        let ev; try{ ev = JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
+        if(ev.type === "results"){
+          lastData = {nodes: ev.nodes || [], edges: ev.edges || [], hidden: ev.hidden || 0};
+          render(lastData, null);
+          ensureBox().innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" id="ansBody">…</div>`;
+        } else if(ev.type === "noai"){
+          ensureBox().innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">要約は利用できません（${esc(ev.reason||"不明")}）。</div>`;
+        } else if(ev.type === "token"){
+          answer += ev.text; const b = document.getElementById("ansBody"); if(b) b.textContent = answer;
+        } else if(ev.type === "citations"){ cites = ev.citations; }
+        else if(ev.type === "done"){ finalizeAnswer(ensureBox(), answer, cites, ev.model); }
+        else if(ev.type === "error"){ const b = document.getElementById("ansBody"); if(b) b.innerHTML = `<span style="color:var(--sub)">生成に失敗：${esc(ev.reason||"")}</span>`; }
+      }
+    }
+  }catch(e){ runAIFallback(q, industry, loose); }
+}
+
+function finalizeAnswer(box, answer, cites, model){
+  const c = (cites || []).map(x =>
+    `[${x.n}] <a href="/data/${encodeURIComponent(x.source)}" target="_blank">${esc(x.title)}</a>`).join("　");
+  box.innerHTML = `<h4>AIによる要約（Azure・${esc(model||"")}）</h4>
+    <div class="body">${highlight(answer, [])}</div>
+    <div class="cites">出典　${c}</div>
+    <div class="warn">※ この要約のためクエリと上位事例が Azure に送信されています。</div>`;
+}
+
+async function runAIFallback(q, industry, loose){
+  try{
+    const url = "/api/answer?q=" + encodeURIComponent(q)
+      + "&industry=" + encodeURIComponent(industry) + "&k=" + topK + (loose ? "&loose=1" : "");
+    const data = await (await fetch(url)).json();
+    if(data.error){ $("#result").innerHTML = `<div class="empty">検索できませんでした：${esc(data.error)}</div>`; return; }
+    lastData = {nodes: data.nodes || [], edges: data.edges || [], hidden: data.hidden || 0};
+    render(lastData, null); showAnswer(data);
+  }catch(e){
+    $("#result").innerHTML = `<div class="empty">エラーが発生しました：${e}</div>`;
+  }
+}
+
+function showAnswer(a){
+  let box = document.getElementById("answerBox");
+  if(!box){
+    box = document.createElement("div");
+    box.id = "answerBox"; box.className = "answer";
+    $("#result").prepend(box);
+  }
+  if(!a.answer){
+    box.innerHTML = `<h4>AIによる要約（Azure）</h4><div class="body" style="color:var(--sub)">要約は利用できません（${esc(a.reason||"不明")}）。</div>`;
+    return;
+  }
+  const cites = (a.citations || []).map(c =>
+    `[${c.n}] <a href="/data/${encodeURIComponent(c.source)}" target="_blank">${esc(c.title)}</a>`).join("　");
+  box.innerHTML = `<h4>AIによる要約（Azure・${esc(a.model||"")}）</h4>
+    <div class="body">${highlight(a.answer, [])}</div>
+    <div class="cites">出典　${cites}</div>
+    <div class="warn">※ この要約のためクエリと上位事例が Azure に送信されています。</div>`;
+}
+
+async function upload(){
+  const input = $("#files");
+  if(!input.files.length){ $("#upstatus").textContent = "ファイルを選んでください。"; return; }
+  const fd = new FormData();
+  for(const f of input.files) fd.append("files", f);
+  fd.append("industry", $("#upIndustry").value);
+  $("#upstatus").textContent = "アップロード中…";
+  try{
+    const r = await (await fetch("/api/upload", {method:"POST", body:fd})).json();
+    if(r.error){ $("#upstatus").textContent = "エラー：" + r.error; return; }
+    input.value = "";
+    pollJob(r.job_id, r.rejected || []);
+  }catch(e){
+    $("#upstatus").textContent = "アップロードに失敗しました：" + e;
+  }
+}
+
+async function pollJob(jobId, rejected){
+  try{
+    const j = await (await fetch("/api/job/" + jobId)).json();
+    if(j.error){ $("#upstatus").textContent = "エラー：" + j.error; return; }
+    if(j.status === "done"){
+      const msg = [`追加 ${j.added.length} 件`];
+      if(rejected.length) msg.push(`未対応 ${rejected.length} 件`);
+      if(j.errors && j.errors.length) msg.push(`失敗 ${j.errors.length} 件`);
+      $("#upstatus").textContent = msg.join(" / ") + `（登録合計 ${j.count} 件）`;
+      $("#metatext").textContent = `登録事例 ${j.count} 件`;
+      fillIndustries(j.industries || []);
+      return;
+    }
+    const cur = j.current ? "：" + j.current : "";
+    $("#upstatus").textContent = `取り込み中 ${j.done}/${j.total}${cur}（初回はモデル/OCRのDLで時間がかかります）`;
+    setTimeout(() => pollJob(jobId, rejected), 1000);
+  }catch(e){
+    $("#upstatus").textContent = "進捗の取得に失敗しました：" + e;
+  }
+}
+
+function matchBadge(node){
+  const pct = Math.round((node.relevance != null ? node.relevance : node.score) * 100);
+  return `<span class="match">関連度 ${pct}%</span>`;
+}
+
+function fieldRow(label, val, color){
+  if(!val) return "";
+  return `<div style="margin-bottom:12px;">
+    <div class="row-label">${label}</div>
+    <div class="row-val"${color?` style="color:${color}"`:""}>${esc(val)}</div>
+  </div>`;
+}
+
+function render(data, selectedId){
+  const nodes = data.nodes || [];
+  const hidden = data.hidden || 0;
+  if(!nodes.length){
+    const more = hidden > 0
+      ? `関連が弱い候補が <b>${hidden}</b> 件あります。<br><button class="go" id="loose" style="margin-top:12px">弱い候補も表示</button>`
+      : `言い回しや業種を変えるか、「＋ 事例を追加」で事例を登録してください。`;
+    $("#result").innerHTML = `<div class="empty">関連の高い事例が見つかりませんでした。<br>${more}</div>`;
+    const lb = document.getElementById("loose");
+    if(lb) lb.onclick = () => run(true);
+    return;
+  }
+  const notice = hidden > 0
+    ? `<div class="meta" style="margin:0 0 12px">関連が弱い候補が ${hidden} 件隠れています
+       <button class="linkbtn" id="loose">弱い候補も表示</button></div>`
+    : "";
+  const selected = selectedId ? nodes.find(n => n.id === selectedId) : null;
+  $("#result").innerHTML = notice + `
+    <div class="layout">
+      <div class="card graph-card">
+        <div id="graph"></div>
+        <div class="graph-hint">中心＝あなたの問題。線が太い・近いほど意味が似ています。点をタップで詳細表示。</div>
+      </div>
+      <div id="side"></div>
+    </div>`;
+  const lb = document.getElementById("loose");
+  if(lb) lb.onclick = () => run(true);
+  drawGraph(data, selected ? selected.id : null);
+  if(selected) renderDetail(selected, nodes);
+  else renderList(nodes);
+}
+
+function renderList(nodes){
+  $("#side").innerHTML = `<div class="list">` + nodes.map(c => `
+    <div class="item" data-id="${c.id}">
+      <div class="item-top">
+        <span class="item-title">${esc(c.title)}</span>
+        ${matchBadge(c)}
+      </div>
+      <div class="item-sub">${esc(c.problem || c.excerpt)}</div>
+      <div class="fb">
+        <button class="fbbtn" data-id="${c.id}" data-vote="up" title="役に立った">👍</button>
+        <button class="fbbtn" data-id="${c.id}" data-vote="down" title="違う">👎</button>
+      </div>
+    </div>`).join("") + `</div>`
+    + (nodes.length >= topK ? `<div style="text-align:center; margin-top:10px">
+        <button class="linkbtn" id="moreBtn">さらに表示（+6件）</button></div>` : "");
+  document.querySelectorAll(".item").forEach(el =>
+    el.onclick = () => render(lastData, parseInt(el.dataset.id)));
+  document.querySelectorAll(".fbbtn").forEach(b =>
+    b.onclick = (e) => { e.stopPropagation(); sendFeedback(b.dataset.id, b.dataset.vote, b); });
+  const mb = document.getElementById("moreBtn");
+  if(mb) mb.onclick = () => { topK += 6; run(lastLoose); };
+}
+
+function sendFeedback(id, vote, btn){
+  const fd = new FormData();
+  fd.append("q", $("#q").value.trim());
+  fd.append("case_id", id);
+  fd.append("vote", vote);
+  fetch("/api/feedback", {method: "POST", body: fd})
+    .then(r => r.json()).then(() => { if(btn){ btn.disabled = true; btn.style.opacity = .5; } })
+    .catch(() => {});
+}
+
+function renderDetail(c, nodes){
+  const edges = (lastData.edges || []).filter(e => e.a === c.id || e.b === c.id);
+  const related = edges.map(e => {
+    const otherId = e.a === c.id ? e.b : e.a;
+    const node = nodes.find(n => n.id === otherId);
+    return node ? {title: node.title, sim: e.sim} : null;
+  }).filter(Boolean).sort((a,b) => b.sim - a.sim).slice(0,3);
+
+  $("#side").innerHTML = `
+    <div class="card detail">
+      <button class="back" id="back">← 一覧へ戻る</button>
+      <div style="display:flex; justify-content:space-between; align-items:start; gap:8px; margin-bottom:14px;">
+        <h3>${esc(c.title)}</h3>${matchBadge(c)}
+      </div>
+      ${fieldRow("業種" + AUTO_TAG, c.industry)}
+      ${c.evidence ? `
+        <div style="margin-bottom:12px;">
+          <div class="row-label">なぜ近いか（本文の該当箇所）</div>
+          <div class="evidence">${highlight(c.evidence, c.matched)}</div>
+        </div>` : ""}
+      ${fieldRow("課題" + AUTO_TAG, c.problem)}
+      ${fieldRow("施策" + AUTO_TAG, c.action)}
+      ${fieldRow("成果" + AUTO_TAG, c.result, "var(--accent)")}
+      ${(!c.problem && !c.action && !c.result && !c.evidence) ? `
+        <div style="margin-bottom:12px;">
+          <div class="row-label">本文（抜粋）</div>
+          <div class="row-val">${esc(c.excerpt)}</div>
+        </div>` : ""}
+      <div style="margin-bottom:14px;">
+        <a class="open-link" href="/data/${encodeURIComponent(c.source)}" target="_blank">元ファイルを開く（${esc(c.source)}）↗</a>
+      </div>
+      <div class="fb">
+        <button class="fbbtn" data-vote="up" title="この事例は役に立った">👍 役に立った</button>
+        <button class="fbbtn" data-vote="down" title="この事例は違う">👎 違う</button>
+      </div>
+      ${related.length ? `
+        <div style="border-top:1px solid var(--line); margin:8px 0 12px;"></div>
+        <div class="row-label" style="margin-bottom:8px;">つながりの強い事例</div>
+        ${related.map(r => `<div style="font-size:13px; margin-bottom:6px;">
+          <span style="color:var(--accent2)">◦</span> ${esc(r.title)}
+          <span style="color:var(--sub)">（類似 ${Math.round(r.sim*100)}%）</span></div>`).join("")}
+      ` : ""}
+    </div>`;
+  $("#back").onclick = () => render(lastData, null);
+  document.querySelectorAll("#side .fbbtn").forEach(b =>
+    b.onclick = () => sendFeedback(c.id, b.dataset.vote, b));
+}
+
+function drawGraph(data, selectedId){
+  const W=520, H=420, cx=W/2, cy=H/2;
+  const nodes = data.nodes.map((c,i) => {
+    const rel = (c.relevance != null ? c.relevance : c.score);  // 関連度で距離・大きさを決める
+    const angle = (i / data.nodes.length) * Math.PI * 2 - Math.PI/2;
+    const dist = 70 + (1 - rel) * 130;
+    return {...c, rel, x: cx + Math.cos(angle)*dist, y: cy + Math.sin(angle)*dist, r: 13 + rel*12};
+  });
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">`;
+  // 中心への線
+  for(const n of nodes){
+    svg += `<line x1="${cx}" y1="${cy}" x2="${n.x}" y2="${n.y}"
+      stroke="${PALETTE.accent}" stroke-opacity="${0.15 + n.score*0.5}" stroke-width="${0.6 + n.score*3}" />`;
+  }
+  // 事例同士のつながり
+  for(const e of (data.edges || [])){
+    const a = byId[e.a], b = byId[e.b];
+    if(!a || !b) continue;
+    svg += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"
+      stroke="${PALETTE.sub}" stroke-opacity="${Math.min(0.5,(e.sim-0.75)*1.5)}" stroke-width="${e.sim*1.5}" />`;
+  }
+  // 中心ノード
+  svg += `<circle cx="${cx}" cy="${cy}" r="26" fill="${PALETTE.center}" />
+    <text x="${cx}" y="${cy-2}" text-anchor="middle" font-size="11" font-weight="700" fill="#06231F">あなたの</text>
+    <text x="${cx}" y="${cy+11}" text-anchor="middle" font-size="11" font-weight="700" fill="#06231F">問題</text>`;
+  // 事例ノード
+  for(const n of nodes){
+    const on = selectedId === n.id;
+    const label = n.title.length > 12 ? n.title.slice(0,11) + "…" : n.title;
+    svg += `<g class="gnode" data-id="${n.id}">
+      <circle cx="${n.x}" cy="${n.y}" r="${n.r}"
+        fill="${on?PALETTE.accent2:PALETTE.node}" stroke="${on?PALETTE.accent2:PALETTE.accent}"
+        stroke-opacity="${on?1:0.5}" stroke-width="${on?2.5:1.2}" />
+      <text x="${n.x}" y="${n.y + n.r + 13}" text-anchor="middle" font-size="10.5"
+        fill="${on?PALETTE.accent2:PALETTE.sub}">${esc(label)}</text>
+    </g>`;
+  }
+  svg += `</svg>`;
+  $("#graph").innerHTML = svg;
+  document.querySelectorAll(".gnode").forEach(g =>
+    g.onclick = () => render(lastData, parseInt(g.dataset.id)));
+}
+
+const CLUSTER_COLORS = ["#4DD6C1","#F2B441","#7AA2F7","#E06C9F","#9ECE6A","#BB9AF7","#F7768E","#2AC3DE","#E0AF68","#73DACA","#C0CAF5","#FF9E64"];
+
+async function showMap(){
+  $("#result").innerHTML = `<div class="empty">マップを生成中…</div>`;
+  try{
+    const m = await (await fetch("/api/map")).json();
+    if(m.error){ $("#result").innerHTML = `<div class="empty">マップを作成できませんでした：${esc(m.error)}</div>`; return; }
+    if(!m.cases || !m.cases.length){ $("#result").innerHTML = `<div class="empty">まだ事例がありません。「＋ 事例を追加」から登録してください。</div>`; return; }
+    renderMap(m);
+  }catch(e){ $("#result").innerHTML = `<div class="empty">エラー：${e}</div>`; }
+}
+
+function renderMap(m){
+  $("#result").innerHTML = `
+    <div class="meta" style="margin:0 0 12px">事例マップ：${m.cases.length}件を ${m.clusters.length} トピックに自動分類（点=事例・色=トピック）</div>
+    <div class="layout">
+      <div class="card graph-card"><div id="map"></div>
+        <div class="graph-hint">近い点ほど内容が類似。キーワードのチップで検索できます。</div></div>
+      <div id="side"></div>
+    </div>`;
+  // 散布図
+  const W=520,H=420,pad=26, col=(c)=>CLUSTER_COLORS[c % CLUSTER_COLORS.length];
+  const X=(x)=>pad+x*(W-2*pad), Y=(y)=>pad+y*(H-2*pad);
+  const byIdx = m.cases;
+  let svg=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block">`;
+  for(const e of (m.edges||[])){
+    const a=byIdx[e.a], b=byIdx[e.b]; if(!a||!b) continue;
+    svg+=`<line x1="${X(a.x)}" y1="${Y(a.y)}" x2="${X(b.x)}" y2="${Y(b.y)}" stroke="${PALETTE.sub}" stroke-opacity="${Math.min(.5,(e.sim-.5))}" stroke-width="1"/>`;
+  }
+  m.cases.forEach(c=>{
+    const lab=c.title.length>10?c.title.slice(0,9)+"…":c.title;
+    svg+=`<g class="gnode" data-q="${esc(c.title)}"><circle cx="${X(c.x)}" cy="${Y(c.y)}" r="7" fill="${col(c.cluster)}" stroke="#0E1116" stroke-width="1"/>`;
+    svg+=`<text x="${X(c.x)}" y="${Y(c.y)-10}" text-anchor="middle" font-size="9" fill="${PALETTE.sub}">${esc(lab)}</text></g>`;
+  });
+  svg+=`</svg>`;
+  $("#map").innerHTML=svg;
+  document.querySelectorAll("#map .gnode").forEach(g=>g.onclick=()=>{ $("#q").value=g.dataset.q; newSearch(); });
+  // クラスタ凡例
+  $("#side").innerHTML = m.clusters.map(cl=>`
+    <div class="cluster">
+      <div class="ctitle"><span class="dot" style="background:${col(cl.id)}"></span>トピック${cl.id+1}（${cl.size}件）</div>
+      <div>${(cl.keywords||[]).map(k=>`<span class="chip" data-q="${esc(k)}">${esc(k)}</span>`).join("")||'<span style="color:var(--sub);font-size:12px">—</span>'}</div>
+    </div>`).join("");
+  document.querySelectorAll("#side .chip").forEach(ch=>ch.onclick=()=>{ $("#q").value=ch.dataset.q; newSearch(); });
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// 根拠テキストの該当語をハイライト（長い語から順に、エスケープ後の文字列を対象に）
+function highlight(text, terms){
+  let html = esc(text);
+  const uniq = [...new Set(terms || [])].sort((a,b) => b.length - a.length);
+  for(const t of uniq){
+    if(!t) continue;
+    const e = esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    html = html.replace(new RegExp(e, "g"), "<mark>$&</mark>");
+  }
+  return html;
+}
+
+$("#go").onclick = newSearch;
+$("#q").addEventListener("keydown", e => { if(e.key === "Enter") newSearch(); });
+$("#industry").addEventListener("change", () => { if($("#q").value.trim()) newSearch(); });
+$("#showMap").onclick = showMap;
+$("#toggleUpload").onclick = () => $("#uploader").classList.toggle("open");
+$("#uploadBtn").onclick = upload;
+$("#aiToggle").addEventListener("change", () => { if($("#q").value.trim()) run(false); });
+loadStats();
+</script>
+</body>
+</html>

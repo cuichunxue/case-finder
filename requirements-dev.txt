@@ -1,0 +1,4 @@
+# 開発・テスト用（本体は requirements.txt）。
+# テストはスタブ埋め込みで動くため、重いモデル依存なしで実行できます。
+-r requirements.txt
+pytest>=8,<9

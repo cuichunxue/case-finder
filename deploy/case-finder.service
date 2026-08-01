@@ -1,0 +1,35 @@
+# 事例ファインダーの systemd ユニット例（自動起動・自動再起動）。
+#
+# 設置:
+#   sudo cp deploy/case-finder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now case-finder
+#   systemctl status case-finder
+#
+# 監視例（落ちたら再起動は Restart=always が担当。外形監視は /healthz を利用）:
+#   curl -fsS http://127.0.0.1:5000/healthz
+
+[Unit]
+Description=Case Finder (local semantic case search)
+After=network.target
+
+[Service]
+Type=simple
+# 実行ユーザー/パスは環境に合わせて変更
+User=caseapp
+WorkingDirectory=/opt/case-finder
+# venv の python を直接指定
+ExecStart=/opt/case-finder/.venv/bin/python /opt/case-finder/app.py
+Restart=always
+RestartSec=3
+# --- 環境変数（必要に応じて）---
+Environment=PORT=5000
+# 社外秘なら認証を有効化
+# Environment=CASE_FINDER_PASSWORD=ひみつ
+# ローカル限定にしてリバースプロキシ(TLS)経由にする場合
+# Environment=CASE_FINDER_HOST=127.0.0.1
+# GPUを使う場合
+# Environment=CASE_FINDER_DEVICE=cuda
+
+[Install]
+WantedBy=multi-user.target
